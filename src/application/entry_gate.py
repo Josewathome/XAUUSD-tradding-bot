@@ -1,0 +1,533 @@
+"""
+entry_gate.py — Entry risk-gate & position sizing (FRAMEWORK component).
+
+Converts a StrategySignal (produced by the strategy engine, carrying the
+proposed entry/SL/TP levels) into an EntryCandidate that ExecutionService can
+place. This module is pure RISK MANAGEMENT INFRASTRUCTURE — it contains no
+signal generation and no entry/exit price math. The strategy decides WHERE to
+trade; the gate decides WHETHER it is safe and HOW BIG.
+
+Gate chain (all must pass):
+  0.  Loss-streak / reversal-reentry cooldown
+  1.  News proximity      — no high-impact event within the pre-window
+  2.  Session filter      — per-symbol UTC trading windows
+  3.  Tick velocity       — minimum ticks/sec to confirm a live market
+  4.  Daily drawdown      — equity-based circuit breaker
+  5.  Portfolio limits    — MarginManager (max open, per-symbol, reserve, ccy)
+  6.  Margin validation    — free margin + margin level floor
+  6a. Spread / cost sanity — round-trip cost vs TP1 target
+  6b. Expected value       — positive EV after cost (with bootstrap exploration)
+  7.  Anti-duplicate       — same symbol+direction not repeated within cooldown
+  8.  Minimum SL distance  — SL at least the per-symbol floor
+  9.  Minimum R:R          — reachable TP1 meets the R:R floor
+
+The SL/TP levels are taken verbatim from the StrategySignal. If the strategy
+does not supply valid levels the signal is rejected (fail closed) — the gate
+never fabricates exit math.
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Dict, Optional
+
+import src.config as config
+from src.domain.entities import Direction, SignalType, Timeframe, TradeSignal
+from src.domain.value_objects import BrokerCost, PipCalculator
+from src.strategy.interfaces import StrategySignal
+
+logger = logging.getLogger(__name__)
+
+
+# ── Gate block reasons ─────────────────────────────────────────────────────────
+
+class GateBlockReason:
+    NEWS          = "news_proximity"
+    SESSION       = "outside_session_window"
+    TICK_VELOCITY = "tick_velocity_too_low"
+    DRAWDOWN      = "daily_drawdown_limit_hit"
+    MARGIN        = "insufficient_margin"
+    EV_NEGATIVE   = "expected_value_negative"
+    ANTI_DUPE     = "duplicate_signal_within_cooldown"
+    BAD_LEVELS    = "strategy_levels_invalid"
+    SL_TOO_SMALL  = "sl_distance_below_minimum"
+    RR_TOO_LOW    = "rr_below_minimum"
+
+
+_DEFAULT_MIN_SL = 3.0    # pips
+
+
+def _symbol_session(symbol: str) -> tuple:
+    sessions = getattr(config, "SCALPER_SYMBOL_SESSIONS", {})
+    if symbol in sessions:
+        return sessions[symbol]
+    return (
+        getattr(config, "SCALPER_SESSION_START_UTC", 5),
+        getattr(config, "SCALPER_SESSION_END_UTC", 17),
+    )
+
+
+class EntryGate:
+    """
+    Validates StrategySignals and sizes the position.
+
+    No hard cap on daily/open/per-symbol trade count beyond the MarginManager
+    portfolio limits. The constraints are:
+      - Market quality (tick velocity, spread)
+      - Account safety (drawdown circuit breaker, margin level, portfolio reserve)
+      - Trade quality (EV gate, R:R gate)
+      - Execution safety (anti-duplicate, news, session)
+    """
+
+    def __init__(self, news_manager, execution) -> None:
+        self._news = news_manager
+        self._exec = execution
+        self._session_start_equity: Optional[float] = None
+
+        self._last_fill: Dict[str, Dict[str, datetime]] = {}
+        self._daily_counts: Dict[str, int] = {}
+        self._exploration_counts: Dict[str, int] = {}
+
+        from src.application.margin_manager import MarginManager
+        self._margin = MarginManager(
+            trade_repo=execution._tr,
+            execution_service=execution,
+        )
+
+        self._last_new_day_utc: Optional[str] = None
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    def on_new_day(self, balance: float) -> None:
+        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+        if self._last_new_day_utc == today_utc:
+            return
+        self._last_new_day_utc = today_utc
+
+        self._daily_counts.clear()
+        self._exploration_counts.clear()
+        equity = self._margin.get_equity(balance)
+        self._session_start_equity = equity
+        logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
+
+    def record_trade(self) -> None:
+        today = datetime.now(tz=timezone.utc).date().isoformat()
+        self._daily_counts[today] = self._daily_counts.get(today, 0) + 1
+
+    def record_fill(self, symbol: str, direction: Direction) -> None:
+        self._last_fill.setdefault(symbol, {})[direction.value] = datetime.now(tz=timezone.utc)
+
+    def daily_trade_count(self) -> int:
+        today = datetime.now(tz=timezone.utc).date().isoformat()
+        return self._daily_counts.get(today, 0)
+
+    def evaluate(
+        self,
+        signal:        StrategySignal,
+        current_price: float,
+        now:           datetime,
+        balance:       float,
+        pip_calc:      PipCalculator,
+        pip_value:     float,          # per-pip money value per 1.0 lot, account ccy
+        digits:        int,
+        broker_cost:   BrokerCost,
+    ) -> Optional[object]:
+        sym = signal.symbol
+
+        # ── Fail-closed sizing precondition ────────────────────────
+        if pip_value is None or pip_value <= 0:
+            logger.error(
+                "ENTRY_GATE_BLOCK [%s] pip_value invalid (%s) — cannot size safely, rejecting",
+                sym, pip_value,
+            )
+            return None
+
+        # ── Strategy-supplied levels sanity (fail closed) ──────────
+        sl_price  = signal.stop_loss
+        tp1_price = signal.take_profit_1
+        tp2_price = signal.take_profit_2
+        is_long   = signal.direction == Direction.BULLISH
+        levels_ok = (
+            sl_price and tp1_price and tp2_price
+            and ((is_long and sl_price < current_price < tp1_price <= tp2_price) or
+                 (not is_long and sl_price > current_price > tp1_price >= tp2_price))
+        )
+        if not levels_ok:
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] %s | entry=%.5f sl=%.5f tp1=%.5f tp2=%.5f",
+                sym, GateBlockReason.BAD_LEVELS, current_price, sl_price, tp1_price, tp2_price,
+            )
+            return None
+
+        # ── Gate 0: Loss-streak cooldown ───────────────────────────
+        try:
+            if self._exec.is_symbol_paused(sym, now):
+                logger.info("ENTRY_GATE_BLOCK [%s] loss_streak_cooldown", sym)
+                return None
+        except Exception as exc:
+            logger.error("Loss-streak check failed for %s: %s — rejecting (fail closed)", sym, exc)
+            return None
+
+        # ── Gate 0b: Reversal re-entry cooldown ────────────────────
+        try:
+            if self._exec.is_reversal_cooldown(sym, now):
+                logger.info("ENTRY_GATE_BLOCK [%s] reversal_reentry_cooldown", sym)
+                return None
+        except Exception as exc:
+            logger.error("Reversal-cooldown check failed for %s: %s — rejecting (fail closed)", sym, exc)
+            return None
+
+        # ── Gate 1: News proximity ─────────────────────────────────
+        if self._is_news_blocked(sym, now):
+            logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.NEWS)
+            return None
+
+        # ── Gate 2: Per-symbol session window ─────────────────────
+        if not self._in_session(sym, now):
+            start, end = _symbol_session(sym)
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] %s | %02d:%02d UTC (window %02d:00-%02d:00 UTC)",
+                sym, GateBlockReason.SESSION, now.hour, now.minute, start, end,
+            )
+            return None
+
+        # ── Gate 3: Tick velocity ──────────────────────────────────
+        min_velocity  = getattr(config, "SCALPER_MIN_TICK_VELOCITY", 1.0)
+        live_velocity = signal.tick_velocity
+        vel_passed    = live_velocity >= min_velocity
+
+        eval_id = str(uuid.uuid4())
+        try:
+            from src.application.tick_analytics import get_analytics
+            get_analytics().record_evaluation(
+                eval_id=eval_id, symbol=sym,
+                velocity=live_velocity, threshold=min_velocity,
+                spread_pips=broker_cost.spread_pips,
+                passed_velocity=vel_passed,
+                gate_block_reason="velocity" if not vel_passed else "passed",
+                now=now,
+            )
+        except Exception as _exc:
+            logger.debug("TickAnalytics record_evaluation failed: %s", _exc)
+
+        if not vel_passed:
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] %s | velocity=%.2f < %.2f ticks/s",
+                sym, GateBlockReason.TICK_VELOCITY, live_velocity, min_velocity,
+            )
+            return None
+
+        # ── Gate 4: Daily drawdown circuit breaker ─────────────────
+        drawdown_limit = getattr(config, "DAILY_DRAWDOWN_LIMIT_PCT", 6.0)
+        current_equity = self._margin.get_equity(balance)
+        if (self._session_start_equity is not None and
+                self._session_start_equity > 0 and
+                current_equity < self._session_start_equity):
+            dd_pct = (self._session_start_equity - current_equity) / self._session_start_equity * 100
+            if dd_pct >= drawdown_limit:
+                logger.warning(
+                    "ENTRY_GATE_BLOCK [%s] %s: equity_dd=%.2f%% >= %.2f%% — circuit breaker "
+                    "(equity=%.2f vs baseline=%.2f)",
+                    sym, GateBlockReason.DRAWDOWN, dd_pct, drawdown_limit,
+                    current_equity, self._session_start_equity,
+                )
+                return None
+
+        # ── Gate 5: Portfolio-level allocation check ───────────────
+        tq_score = getattr(signal, "tq_score", 0.0)
+        allowed, mm_reason = self._margin.can_enter(
+            symbol=sym, confidence=signal.confidence,
+            tq_score=tq_score, balance=balance,
+        )
+        if not allowed:
+            logger.info("ENTRY_GATE_BLOCK [%s] PORTFOLIO_LIMIT | %s", sym, mm_reason)
+            return None
+
+        # ── Gate 6: Margin validation (real MT5 figures) ───────────
+        if not self._margin_ok(sym):
+            logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.MARGIN)
+            return None
+
+        # ── Distances from strategy levels ─────────────────────────
+        sl_dist_pips  = pip_calc.price_to_pips(abs(current_price - sl_price))
+        tp1_dist_pips = pip_calc.price_to_pips(abs(tp1_price - current_price))
+        eff_rr        = (tp1_dist_pips / sl_dist_pips) if sl_dist_pips > 0 else 0.0
+
+        # ── Gate 6a: Spread / cost sanity (fail closed) ────────────
+        if not self._cost_ok(sym, tp1_dist_pips, broker_cost):
+            logger.info("ENTRY_GATE_BLOCK [%s] spread_cost_excessive", sym)
+            return None
+
+        # ── Gate 6b: Expected value ────────────────────────────────
+        is_exploration = False
+        ev_status = self._ev_status(sym, sl_dist_pips, tp1_dist_pips, broker_cost)
+        if ev_status == "unknown":
+            logger.info("ENTRY_GATE_BLOCK [%s] %s (cost/EV undeterminable)", sym, GateBlockReason.EV_NEGATIVE)
+            return None
+        if ev_status == "negative":
+            if self._exploration_allowed(sym):
+                is_exploration = True
+                logger.info(
+                    "EXPLORATION [%s] EV-negative but bootstrap probe slot available "
+                    "(used %d/%d today) — bypassing EV gate ONLY, at minimum risk",
+                    sym, self._exploration_counts.get(sym, 0),
+                    getattr(config, "EXPLORATION_TRADES_PER_DAY", 8),
+                )
+            else:
+                logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.EV_NEGATIVE)
+                return None
+
+        # ── Gate 7: Anti-duplicate ─────────────────────────────────
+        anti_dupe_secs = getattr(config, "ANTI_DUPE_SECONDS", 60)
+        last = self._last_fill.get(sym, {}).get(signal.direction.value)
+        if last is not None:
+            elapsed = (now - last).total_seconds()
+            if elapsed < anti_dupe_secs:
+                logger.info(
+                    "ENTRY_GATE_BLOCK [%s] %s | same direction filled %.0fs ago (cooldown=%ds)",
+                    sym, GateBlockReason.ANTI_DUPE, elapsed, anti_dupe_secs,
+                )
+                return None
+
+        # ── Gate 8: Minimum SL distance ────────────────────────────
+        _min_sl_cfg = getattr(config, "SCALPER_MIN_SL_PIPS",
+                              getattr(config, "MIN_SL_PIPS", _DEFAULT_MIN_SL))
+        if isinstance(_min_sl_cfg, dict):
+            min_sl = _min_sl_cfg.get(sym, getattr(config, "SCALPER_MIN_SL_PIPS_DEFAULT", _DEFAULT_MIN_SL))
+        else:
+            min_sl = float(_min_sl_cfg)
+        if sl_dist_pips < min_sl:
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] %s: sl=%.1f < %.1f pips",
+                sym, GateBlockReason.SL_TOO_SMALL, sl_dist_pips, min_sl,
+            )
+            return None
+
+        # ── Gate 9: Minimum R:R on the reachable target ────────────
+        min_rr_floor = getattr(config, "MIN_RR_FLOOR", getattr(config, "MIN_RR", 1.5))
+        if eff_rr < min_rr_floor - 1e-6:
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] %s: reachable_rr=%.2f < %.2f (tp1=%.1f sl=%.1f pips)",
+                sym, GateBlockReason.RR_TOO_LOW, eff_rr, min_rr_floor,
+                tp1_dist_pips, sl_dist_pips,
+            )
+            return None
+
+        # ── Build TradeSignal (broker TP = TP2 backstop) ───────────
+        trade_signal = TradeSignal(
+            symbol=      sym,
+            direction=   signal.direction,
+            entry_price= current_price,
+            stop_loss=   sl_price,
+            take_profit= tp2_price,
+            signal_type= SignalType.PREDICTIVE,
+            trade_score= int(signal.confidence * 100),
+            timeframe=   Timeframe.M1,
+        )
+
+        confidence  = signal.confidence
+        setup_score = int(confidence * 100)
+        risk_pct, grade = self._margin.quality_risk_pct(confidence, tq_score)
+
+        if is_exploration:
+            risk_pct = min(risk_pct, getattr(config, "RISK_MIN_CONVICTION", 0.5))
+            grade    = "C"
+
+        try:
+            from src.application.execution_service import EntryCandidate
+        except ImportError:
+            logger.error("Could not import EntryCandidate")
+            return None
+
+        candidate = EntryCandidate(
+            symbol=      sym,
+            signal=      trade_signal,
+            setup_score= setup_score,
+            trade_score= setup_score,
+            grade=       grade,
+            risk_pct=    risk_pct,
+            tp1_price=   tp1_price,
+            tp2_price=   tp2_price,
+            broker_cost= broker_cost,
+            pip_calc=    pip_calc,
+            pip_value=   pip_value,
+            digits=      digits,
+            is_phase2=   False,
+        )
+        candidate._exploration = is_exploration
+        candidate._eval_id = eval_id
+
+        logger.info(
+            "ENTRY_GATE_PASS [%s] %s | conf=%.2f tq=%.2f | grade=%s risk=%.1f%% | "
+            "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.2f | %s | daily_count=%d",
+            sym, signal.direction.value.upper(), confidence, tq_score,
+            grade, risk_pct, current_price, sl_price, tp1_price, tp2_price,
+            sl_dist_pips, eff_rr,
+            "EXPLORATION" if is_exploration else "EV_OK",
+            self.daily_trade_count(),
+        )
+        return candidate
+
+    # ── Exploration bootstrap ──────────────────────────────────────
+
+    def _exploration_allowed(self, symbol: str) -> bool:
+        if not getattr(config, "EXPLORATION_ENABLED", True):
+            return False
+        cap = getattr(config, "EXPLORATION_TRADES_PER_DAY", 8)
+        if self._exploration_counts.get(symbol, 0) >= cap:
+            return False
+        try:
+            journal = getattr(self._exec, "_journal", None)
+            samples = 0
+            if journal is not None and hasattr(journal, "rolling_performance"):
+                samples = journal.rolling_performance(
+                    symbol, n=getattr(config, "EV_ROLLING_WINDOW", 50)
+                ).get("samples", 0)
+            return samples < getattr(config, "EV_MIN_SAMPLES", 30)
+        except Exception as exc:
+            logger.error("Exploration check failed for %s: %s — not exploring", symbol, exc)
+            return False
+
+    def record_exploration(self, symbol: str) -> None:
+        self._exploration_counts[symbol] = self._exploration_counts.get(symbol, 0) + 1
+
+    # ── Private helpers ────────────────────────────────────────────
+
+    def _is_news_blocked(self, symbol: str, now: datetime) -> bool:
+        try:
+            return self._news.is_blocked(symbol, now)
+        except Exception as exc:
+            logger.error("News check failed for %s: %s — blocking (fail closed)", symbol, exc)
+            return True
+
+    @staticmethod
+    def _in_session(symbol: str, now: datetime) -> bool:
+        start, end = _symbol_session(symbol)
+        h = now.hour
+        if start <= end:
+            return start <= h < end
+        return h >= start or h < end
+
+    def _margin_ok(self, symbol: str) -> bool:
+        try:
+            free_margin = self._exec._tr.get_free_margin()
+            if free_margin is None:
+                logger.warning("MARGIN_GATE [%s] free margin unreadable — rejecting (fail closed)", symbol)
+                return False
+            if free_margin <= 0:
+                logger.info("MARGIN_GATE [%s] free margin %.2f <= 0 — rejecting", symbol, free_margin)
+                return False
+            min_level = getattr(config, "MIN_MARGIN_LEVEL_PCT", 200.0)
+            try:
+                level = self._exec._tr.get_margin_level_pct()
+            except Exception as exc:
+                logger.warning("MARGIN_GATE [%s] margin level unreadable: %s — rejecting", symbol, exc)
+                return False
+            if level is not None and level < min_level:
+                logger.info(
+                    "MARGIN_GATE [%s] margin_level=%.0f%% < %.0f%% — rejecting",
+                    symbol, level, min_level,
+                )
+                return False
+            return True
+        except Exception as exc:
+            logger.error("Margin check failed for %s: %s — rejecting (fail closed)", symbol, exc)
+            return False
+
+    @staticmethod
+    def _cost_ok(symbol: str, tp1_dist_pips: float, broker_cost: BrokerCost) -> bool:
+        try:
+            spread = broker_cost.spread_pips
+            _spread_caps = getattr(config, "SCALPER_MAX_SPREAD_PIPS", {})
+            max_spread = (_spread_caps.get(symbol, getattr(config, "MAX_SPREAD_PIPS", 40.0))
+                          if isinstance(_spread_caps, dict) else getattr(config, "MAX_SPREAD_PIPS", 40.0))
+            if spread is None or spread <= 0 or spread > max_spread:
+                logger.info("COST_GATE [%s] spread=%.2f pips > cap=%.1f — rejecting",
+                            symbol, spread if spread is not None else -1, max_spread)
+                return False
+            cost = broker_cost.round_trip_cost_pips()
+            if not (cost == cost) or cost == float("inf"):
+                logger.info("COST_GATE [%s] round-trip cost unknown — rejecting (fail closed)", symbol)
+                return False
+            max_frac = getattr(config, "COST_MAX_FRACTION_OF_TARGET", 0.40)
+            if tp1_dist_pips <= 0:
+                logger.info("COST_GATE [%s] tp1 distance <= 0 — rejecting", symbol)
+                return False
+            if cost > tp1_dist_pips * max_frac:
+                logger.info(
+                    "COST_GATE [%s] cost=%.2f pips > %.0f%% of TP1 target (%.2f pips) — rejecting",
+                    symbol, cost, max_frac * 100, tp1_dist_pips,
+                )
+                return False
+            return True
+        except Exception as exc:
+            logger.error("Cost gate failed for %s: %s — rejecting (fail closed)", symbol, exc)
+            return False
+
+    @staticmethod
+    def _blended_win_pips(sl_dist_pips: float) -> float:
+        tp1_rr  = getattr(config, "TP1_RR_RATIO", 1.5)
+        tp2_rr  = getattr(config, "TP2_RR_RATIO", 2.0)
+        run_rr  = getattr(config, "RUNNER_EXIT_RR", tp1_rr)
+        w1      = getattr(config, "TIERED_TP1_CLOSE_PCT", 0.60)
+        rem     = max(0.0, 1.0 - w1)
+        w2      = getattr(config, "TIERED_TP2_CLOSE_PCT", 0.25) * rem
+        runner  = max(0.0, rem - w2)
+        blended_rr = w1 * tp1_rr + w2 * tp2_rr + runner * run_rr
+        return sl_dist_pips * blended_rr
+
+    def _ev_status(
+        self,
+        symbol:        str,
+        sl_dist_pips:  float,
+        tp1_dist_pips: float,
+        broker_cost:   BrokerCost,
+    ) -> str:
+        try:
+            ev_min = getattr(config, "EV_MIN_PIPS", 0.10)
+            cost   = broker_cost.round_trip_cost_pips()
+            if cost == float("inf") or not (cost == cost):
+                logger.info("EV_GATE [%s] cost unknown — rejecting (fail closed)", symbol)
+                return "unknown"
+
+            win_rate = getattr(config, "ASSUMED_WIN_RATE", 0.50)
+            avg_win  = self._blended_win_pips(sl_dist_pips)
+            avg_loss = sl_dist_pips
+            source   = "bootstrap"
+
+            perf = None
+            try:
+                journal = getattr(self._exec, "_journal", None)
+                if journal is not None and hasattr(journal, "rolling_performance"):
+                    perf = journal.rolling_performance(
+                        symbol, n=getattr(config, "EV_ROLLING_WINDOW", 50),
+                    )
+            except Exception as exc:
+                logger.debug("rolling_performance unavailable for %s: %s", symbol, exc)
+
+            min_samples = getattr(config, "EV_MIN_SAMPLES", 30)
+            if perf and perf.get("samples", 0) >= min_samples \
+                    and perf.get("avg_win_pips", 0) > 0 and perf.get("avg_loss_pips", 0) > 0:
+                win_rate = perf["win_rate"]
+                avg_win  = perf["avg_win_pips"]
+                avg_loss = perf["avg_loss_pips"]
+                source   = f"rolling(n={perf['samples']})"
+            else:
+                win_rate = max(0.0, win_rate - getattr(config, "ASSUMED_WIN_RATE_HAIRCUT", 0.05))
+
+            ev = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss) - cost
+            if ev < ev_min:
+                logger.info(
+                    "EV_GATE [%s] ev=%.2f pips (wr=%.2f win=%.2f loss=%.2f cost=%.2f src=%s) < min=%.2f",
+                    symbol, ev, win_rate, avg_win, avg_loss, cost, source, ev_min,
+                )
+                return "negative"
+            logger.debug(
+                "EV_GATE [%s] PASS ev=%.2f (wr=%.2f win=%.2f loss=%.2f cost=%.2f src=%s)",
+                symbol, ev, win_rate, avg_win, avg_loss, cost, source,
+            )
+            return "pass"
+        except Exception as exc:
+            logger.error("EV gate error for %s: %s — rejecting (fail closed)", symbol, exc)
+            return "unknown"
