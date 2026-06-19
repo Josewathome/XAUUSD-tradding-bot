@@ -66,8 +66,7 @@ from src.infrastructure.stream.zmq_feed             import ZmqFeed, FEED_STOPPED
 from src.infrastructure.stream.streaming_market_data_repo import StreamingMarketDataRepo
 from src.domain.entities                            import Timeframe
 from src.strategy.interfaces                        import IStrategyEngine, ITradeGuardian
-from src.strategy.placeholder_engine               import PlaceholderStrategyEngine
-from src.strategy.placeholder_guardian             import PlaceholderTradeGuardian
+from src.strategy.xauusd_engine                    import XAUUSDStrategyEngine, XAUUSDTradeGuardian
 
 logger = logging.getLogger("main_stream")
 
@@ -88,13 +87,11 @@ _SEED_COUNTS: Dict[Timeframe, int] = {
 # engine emits no signals and the guardian issues no exit decisions.
 
 def build_engine(symbols) -> IStrategyEngine:
-    """Construct the strategy engine. Swap PlaceholderStrategyEngine for the real one."""
-    return PlaceholderStrategyEngine(symbols=symbols)
+    return XAUUSDStrategyEngine(symbols=symbols)
 
 
 def build_guardian() -> ITradeGuardian:
-    """Construct the open-trade guardian. Swap PlaceholderTradeGuardian for the real one."""
-    return PlaceholderTradeGuardian()
+    return XAUUSDTradeGuardian()
 
 
 # ── Inline helpers ─────────────────────────────────────────────────────────────
