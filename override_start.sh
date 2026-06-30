@@ -859,6 +859,33 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
+# ── experts.ini backup daemon ─────────────────────────────────────
+# The operator adds 127.0.0.1 to the WebRequest whitelist AFTER ready_to_trade,
+# so the one-shot backup above always runs too early and captures nothing.
+# This background loop watches for experts.ini to appear or grow (MT5 writes it
+# when Options → Expert Advisors → Allow WebRequest URL is saved) and backs it
+# up immediately. On the next restart the [0/6] restore block finds the backup
+# and 127.0.0.1 is already whitelisted — EA connects without any manual steps.
+(
+    _bak_known_size=0
+    while true; do
+        sleep 10
+        if [ -f "${EXPERTS_INI_LIVE}" ]; then
+            _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+            if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
+                cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+                # Also refresh full Config/ backup so all encrypted blobs stay in sync.
+                if [ -d "${MT5_CONFIG_DIR}" ]; then
+                    rm -rf /config/mt5_config_backup
+                    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+                fi
+                _bak_known_size="${_cur_size}"
+                show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
+            fi
+        fi
+    done
+) &
+
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
 # empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
