@@ -529,6 +529,25 @@ print('1')
         echo "${_val}" > /tmp/_mt5_autotrading_before
     }
     _capture_ea_state
+    # Restore experts.ini (WebRequest whitelist) from backup before EVERY launch.
+    # MT5 resets this file on a hard kill — restoring it here ensures 127.0.0.1
+    # is always whitelisted so SocketConnect succeeds (no err=4014).
+    if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+        mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
+        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+        show_message "[launch] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
+    elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
+        _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+        _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+        if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
+            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+            show_message "[launch] experts.ini reset detected — restored from backup."
+        fi
+    fi
+    # Also restore full Config/ backup for any other whitelist-bearing files.
+    if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+        cp -rn /config/mt5_config_backup/. "${MT5_CONFIG_DIR}/" 2>/dev/null || true
+    fi
     _write_startup_ini
     _patch_terminal_ini
     _empty_default_profile
@@ -867,21 +886,30 @@ show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED
 # up immediately. On the next restart the [0/6] restore block finds the backup
 # and 127.0.0.1 is already whitelisted — EA connects without any manual steps.
 (
-    _bak_known_size=0
+    _bak_known_size=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
     while true; do
         sleep 10
         if [ -f "${EXPERTS_INI_LIVE}" ]; then
             _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
             if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
+                # experts.ini grew — user added a URL or saved Options → back it up
                 cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-                # Also refresh full Config/ backup so all encrypted blobs stay in sync.
                 if [ -d "${MT5_CONFIG_DIR}" ]; then
                     rm -rf /config/mt5_config_backup
                     cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
                 fi
                 _bak_known_size="${_cur_size}"
                 show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
+            elif [ "${_cur_size}" -lt "${_bak_known_size}" ] && [ "${_bak_known_size}" -gt 0 ]; then
+                # experts.ini shrank — MT5 reset it after a hard kill → restore backup immediately
+                cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+                show_message "[experts-watcher] experts.ini reset detected — restored backup (whitelist re-applied)."
             fi
+        elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ "${_bak_known_size}" -gt 0 ]; then
+            # experts.ini vanished entirely — restore it
+            mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
+            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+            show_message "[experts-watcher] experts.ini missing — restored from backup."
         fi
     done
 ) &
