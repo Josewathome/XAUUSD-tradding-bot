@@ -41,7 +41,8 @@ from src.strategy.interfaces import (
     StrategySignal,
 )
 
-logger = logging.getLogger(__name__)
+logger   = logging.getLogger(__name__)
+_sig_log = logging.getLogger("signal.XAUUSD")
 
 
 # ── Session windows (UTC hours, inclusive start / exclusive end) ────────────
@@ -518,6 +519,13 @@ class XAUUSDStrategyEngine(IStrategyEngine):
             symbol, direction.value.upper(), session,
             z_score, lsr, aer, h1_atr, ema20, ema50,
             signal.stop_loss, signal.take_profit_1, signal.take_profit_2,
+        )
+        _sig_log.info(
+            "SIGNAL | %s | %s | entry=%.2f sl=%.2f tp1=%.2f tp2=%.2f | "
+            "session=%s Z=%.2f LSR=%.2f AER=%.2f h1_atr=%.2f conf=%.2f tq=%.2f",
+            symbol, direction.value.upper(),
+            signal.proposed_entry, signal.stop_loss, signal.take_profit_1, signal.take_profit_2,
+            session, z_score, lsr, aer, h1_atr, signal.confidence, signal.tq_score,
         )
         return signal
 
