@@ -97,13 +97,30 @@ fi
 # It also handles the first-run case: when the operator adds 127.0.0.1 via VNC
 # and clicks OK, experts.ini grows → watcher backs it up for future restarts.
 (
+    # At startup: if experts.ini already exists and is larger than the current
+    # backup (or backup doesn't exist), snapshot it now — before MT5 launches.
+    # This covers the "bot is already set up, ready_to_trade is set" case:
+    # experts.ini has the correct whitelist right now, so capture it immediately
+    # rather than waiting for a grow event that will never come.
     _bak_known_size=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+    if [ -f "${EXPERTS_INI_LIVE}" ]; then
+        _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+        if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
+            cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+            if [ -d "${_MT5_CONFIG_DIR_EARLY}" ]; then
+                rm -rf /config/mt5_config_backup
+                cp -r "${_MT5_CONFIG_DIR_EARLY}" /config/mt5_config_backup 2>/dev/null || true
+            fi
+            _bak_known_size="${_cur_size}"
+            show_message "[experts-watcher] experts.ini snapshotted at startup (${_cur_size} bytes)."
+        fi
+    fi
     while true; do
         sleep 10
         if [ -f "${EXPERTS_INI_LIVE}" ]; then
             _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
             if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
-                # experts.ini grew — user added a URL; back it up
+                # File grew — user added a URL via VNC; back it up
                 cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
                 if [ -d "${MT5_CONFIG_DIR:-${_MT5_CONFIG_DIR_EARLY}}" ]; then
                     rm -rf /config/mt5_config_backup
@@ -112,12 +129,12 @@ fi
                 _bak_known_size="${_cur_size}"
                 show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
             elif [ "${_cur_size}" -lt "${_bak_known_size}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-                # experts.ini shrank — MT5 overwrote it after launch → restore backup
+                # File shrank — MT5 overwrote it after launch → restore backup
                 cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
                 show_message "[experts-watcher] experts.ini overwrite detected — backup restored (whitelist preserved)."
             fi
         elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-            # experts.ini vanished entirely — restore it
+            # File vanished — restore it
             mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
             cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
             show_message "[experts-watcher] experts.ini missing — restored from backup."
@@ -125,7 +142,7 @@ fi
     done
 ) &
 _experts_watcher_pid=$!
-show_message "[0/6] experts.ini watcher started (pid ${_experts_watcher_pid}) — will catch MT5 overwrite."
+show_message "[0/6] experts.ini watcher started (pid ${_experts_watcher_pid}) — snapshotted current whitelist, will catch MT5 overwrite."
 
 # EA auto-start on this build is handled by the [StartUp] /config: mechanism
 # (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
