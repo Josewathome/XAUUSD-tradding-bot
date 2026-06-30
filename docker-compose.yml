@@ -1,43 +1,41 @@
-# HOW ENV FILES WORK HERE
-# ──────────────────────────────────────────────────────────────────
-# Docker Compose automatically loads .env for ${VAR} substitution
-# inside this file.  Any $ in those values is treated as a variable
-# reference, which corrupts passwords.  To avoid that:
+# Before first run: copy env.example to .env and fill in your real credentials.
+# Dashboard: http://localhost:8001   |   MT5 VNC: http://localhost:3001  (XAUUSD bot)
 #
-#   .env          — only VNC_USER and VNC_PASSWORD (used as ${VNC_USER}
-#                   below).  Keep these simple — no $ in the values.
-#
-#   secrets.env   — ALL other credentials (MT5, dashboard, news API,
-#                   email).  Loaded via env_file: only, so Docker never
-#                   interpolates it.  Passwords with $ or & are safe.
-#
-# Setup:
-#   cp env.example .env          # fill in VNC_USER / VNC_PASSWORD
-#   cp secrets.example secrets.env   # fill in all other credentials
-#
-# Dashboard: http://localhost:8001   |   MT5 VNC: http://localhost:3001
+# NOTE ON PASSWORDS WITH SPECIAL CHARACTERS ($ & ! etc.)
+# Docker Compose warns "variable not set" when a password contains $ — that is
+# harmless.  The credential is NOT corrupted: override_start.sh re-reads
+# MT5_PASSWORD directly from /bot/.env using grep/sed, bypassing Compose
+# interpolation entirely (same technique used in the scalper container).
 
 services:
   xauusd-bot:
     image: gmag11/metatrader5_vnc:latest
     container_name: xauusd-bot
     restart: unless-stopped
-    stop_grace_period: 30s   # Give SIGTERM 30s to flush checkpoint before SIGKILL.
+    stop_grace_period: 30s   # Give SIGTERM 30s to trigger the bot's clean shutdown
+                              # handler and flush a final checkpoint before SIGKILL.
+                              # Default Docker timeout is 10s — too short for MT5 + Wine.
     ports:
       - "3001:3000"       # noVNC browser UI → http://localhost:3001
       - "8001:8080"       # Trading dashboard → http://localhost:8001
     env_file:
-      - secrets.env       # raw pass-through — $ in passwords is safe here
+      - .env
     environment:
-      # VNC login — read from .env via ${} substitution (keep values $ -free)
+      # VNC login — read from .env via ${} substitution.
+      # If VNC_PASSWORD contains $ Docker warns but the VNC login still works
+      # (KasmVNC reads the env var directly, not through Compose substitution).
       - CUSTOM_USER=${VNC_USER}
       - PASSWORD=${VNC_PASSWORD}
-      # KasmVNC performance — no credentials, interpolation safe
+      # KasmVNC performance settings
       - DRINODE=/dev/dri/renderD128
       - DISPLAY_SIZEW=1280
       - DISPLAY_SIZEH=900
       - DISPLAY_REFRESH=60
       - KASMVNC_RECT_THREADS=4
+
+      # All other credentials (MT5_PASSWORD, TRADING_ID, MT5_SERVER, etc.) are
+      # passed via env_file above.  override_start.sh re-reads MT5_PASSWORD raw
+      # from /bot/.env so $ in the password never reaches Compose interpolation.
     shm_size: "256m"     # Wine + KasmVNC needs > 64 MB default; 256 MB prevents crashes
     dns:
       - 1.1.1.1
@@ -54,7 +52,6 @@ services:
       - ./analytics:/bot/analytics                        # tick velocity analytics — persisted on host
       - ./.checkpoints:/bot/.checkpoints                  # restart checkpoints — persisted on host
       - ./logs:/bot/logs                                  # trading logs — persisted on host
-      # Strategy engine is pluggable (src/strategy/interfaces.py); the framework
 
 volumes:
   mt5_config:
@@ -67,10 +64,4 @@ volumes:
 networks:
   default: {}
   forex-shared:
-    # external: true tells Docker Compose to attach to the pre-existing network
-    # named exactly "forex-shared" instead of creating a new prefixed one
-    # (e.g. "new-forex-bot_forex-shared").  The forex-api project creates this
-    # network first; this bot simply joins it on every restart.
-    # If forex-api is not running yet, create the network manually once:
-    #   docker network create forex-shared
     external: true

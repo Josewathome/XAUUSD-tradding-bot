@@ -1,6 +1,5 @@
 # ── NEVER COMMIT THESE ────────────────────────
 .env
-secrets.env
 
 
 # ── Generated at runtime ──────────────────────
