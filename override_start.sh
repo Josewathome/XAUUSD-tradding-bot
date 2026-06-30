@@ -97,33 +97,31 @@ fi
 # It also handles the first-run case: when the operator adds 127.0.0.1 via VNC
 # and clicks OK, experts.ini grows → watcher backs it up for future restarts.
 (
-    # _bak_known_size is the size of a previously confirmed-good backup.
-    # We never snapshot at startup — experts.ini at this point may already be
-    # MT5's reset (wrong) version. We only back up when the file GROWS beyond
-    # the backup size, which happens when the user adds the URL via VNC Options.
-    _bak_known_size=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+    # The backup is the ground truth — created once by the operator after
+    # adding the URL in VNC (see first-run instructions). The watcher's ONLY
+    # job is to restore from that backup whenever MT5 overwrites or deletes
+    # experts.ini. It never auto-updates the backup (experts.ini is an
+    # encrypted binary; we cannot tell MT5's reset version from the correct one).
+    _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
     while true; do
         sleep 10
+        if [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
+            # No backup yet — nothing to restore; wait for operator to create it.
+            continue
+        fi
         if [ -f "${EXPERTS_INI_LIVE}" ]; then
-            _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-            if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
-                # File grew — user added a URL via VNC; back it up
-                cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-                if [ -d "${MT5_CONFIG_DIR:-${_MT5_CONFIG_DIR_EARLY}}" ]; then
-                    rm -rf /config/mt5_config_backup
-                    cp -r "${MT5_CONFIG_DIR:-${_MT5_CONFIG_DIR_EARLY}}" /config/mt5_config_backup 2>/dev/null || true
-                fi
-                _bak_known_size="${_cur_size}"
-                show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
-            elif [ "${_cur_size}" -lt "${_bak_known_size}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-                # File shrank — MT5 overwrote it after launch → restore backup
+            _cur_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+            if [ "${_cur_mtime}" -gt "${_last_live_mtime}" ]; then
+                # experts.ini was modified (MT5 startup overwrite or any other write) → restore backup
                 cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-                show_message "[experts-watcher] experts.ini overwrite detected — backup restored (whitelist preserved)."
+                _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+                show_message "[experts-watcher] experts.ini changed — restored backup (whitelist preserved)."
             fi
-        elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-            # File vanished — restore it
+        else
+            # experts.ini vanished — restore it
             mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
             cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+            _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
             show_message "[experts-watcher] experts.ini missing — restored from backup."
         fi
     done
@@ -671,10 +669,14 @@ if [ ! -f /config/ready_to_trade ]; then
     echo "     b) Tick: Allow WebRequest for listed URL"
     echo "        Add: http://127.0.0.1"
     echo "     c) Click OK"
-    echo "  3. Run this command to start the bot:"
+    echo "  3. Save the whitelist so it survives restarts:"
+    echo "     docker exec xauusd-bot cp \\"
+    echo "       \"/config/.wine/drive_c/Program Files/MetaTrader 5/Config/experts.ini\" \\"
+    echo "       /config/experts_ini.bak"
+    echo "  4. Run this command to start the bot:"
     echo "     docker exec xauusd-bot touch /config/ready_to_trade"
     echo ""
-    echo "  IMPORTANT: complete step 2 BEFORE running step 3."
+    echo "  IMPORTANT: complete steps 2 and 3 BEFORE running step 4."
     echo "  Waiting for ready_to_trade signal..."
     while [ ! -f /config/ready_to_trade ]; do
         sleep 5
