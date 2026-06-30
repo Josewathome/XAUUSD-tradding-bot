@@ -55,11 +55,11 @@ services:
 
 volumes:
   mt5_config:
-    external: true          # dedicated volume for xauusd-bot — isolated from other MT5 containers
-    name: xauusd_bot_mt5_config
-  news_cache:               # news API TTL cache — wiped every Friday at market close
     external: true
-    name: forex_bot_news_cache
+    name: xauusd_bot_mt5_config
+  news_cache:
+    external: true
+    name: xauusd_bot_news_cache
 
 networks:
   default: {}
