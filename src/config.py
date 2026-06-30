@@ -1,67 +1,43 @@
 # ══════════════════════════════════════════════════════════════════
 #  config.py  —  ALL settings live here. One file.
 #
-#  XAUUSD Trading Bot — trading INFRASTRUCTURE/FRAMEWORK configuration.
+#  SPLIT RESPONSIBILITIES
+#  ──────────────────────
+#  .env (secrets only — never commit):
+#    MT5 credentials, broker server, VNC password, API keys,
+#    dashboard password, email credentials, account balance/currency.
 #
-#  This file is organised in two parts:
-#    1. FRAMEWORK CONFIG — connection, risk management, execution,
-#       monitoring, news, sessions, journaling. Consumed by the
-#       infrastructure in this repo. Change these to operate the bot.
-#    2. STRATEGY-ENGINE CONFIG (further below) — signal-quality and
-#       exit-tuning thresholds consumed by the STRATEGY ENGINE that you
-#       plug in via src/strategy/interfaces.py. They are INERT while the
-#       placeholder engine/guardian are active (no signals are produced),
-#       and are kept here as ready-to-use defaults for the real engine.
+#  config.py (everything else — edit freely, commit safely):
+#    Symbols, risk %, session windows, SL/TP limits, ATR thresholds,
+#    news buffers, position sizing grades, feature flags — all tunable
+#    settings that are NOT secrets belong here as plain constants.
 #
-#  Sensitive values (passwords, API keys) are read from environment
-#  variables first, falling back to the defaults below.
-#  In Docker: set them in docker-compose.yml / .env.
-#  Locally:   export them in your shell, or keep the defaults for dev.
+#  Rule: if it's a password, token, or account number → .env.
+#        if it's a number you'd tune to change bot behaviour → here.
 # ══════════════════════════════════════════════════════════════════
 
 import os
 
-# ── MT5 Account Credentials ────────────────────────────────────────
+# ── SECRETS (read from .env — never hardcode here) ─────────────────
+
 _trading_id_raw = os.environ.get("TRADING_ID")
 if not _trading_id_raw:
-    raise RuntimeError("TRADING_ID environment variable is not set. Set it in your .env or docker-compose.yml.")
+    raise RuntimeError("TRADING_ID not set. Copy env.example → .env and fill it in.")
 TRADING_ID = int(_trading_id_raw)
 
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD")
 if not MT5_PASSWORD:
-    raise RuntimeError("MT5_PASSWORD environment variable is not set.")
+    raise RuntimeError("MT5_PASSWORD not set in .env.")
 
 MT5_SERVER = os.environ.get("MT5_SERVER")
 if not MT5_SERVER:
-    raise RuntimeError("MT5_SERVER environment variable is not set.")
-ACCOUNT_NICKNAME = "Demojose"
-ACCOUNT_CURRENCY = os.environ.get("ACCOUNT_CURRENCY", "KES")
-ACCOUNT_BALANCE  = float(os.environ.get("ACCOUNT_BALANCE", "30000"))
-LEVERAGE         = "1:400"
+    raise RuntimeError("MT5_SERVER not set in .env.")
 
-MT5_PATH = ""
+ACCOUNT_CURRENCY = os.environ.get("ACCOUNT_CURRENCY", "USD")
+ACCOUNT_BALANCE  = float(os.environ.get("ACCOUNT_BALANCE", "10000"))
 
-# ── News API ───────────────────────────────────────────────────────
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
-NEWS_API_URL = os.environ.get("NEWS_API_URL", "http://192.168.1.100:8087")
-# ── Dashboard Auth ─────────────────────────────────────────────────
-DASHBOARD_PASSWORD          = os.environ.get("DASHBOARD_PASSWORD", "")
-JWT_ACCESS_EXPIRES_MINUTES  = int(os.environ.get("JWT_ACCESS_EXPIRES_MINUTES", "15"))
-JWT_REFRESH_EXPIRES_DAYS    = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS", "7"))
-
-# ── Symbols to Trade ───────────────────────────────────────────────
-# This is an XAUUSD-focused bot. The framework is multi-symbol capable —
-# add more symbols here (and matching SYMBOL_DIGITS / TICK_VALUE_USD /
-# SCALPER_SYMBOL_SESSIONS entries below) if the strategy engine supports them.
-SYMBOLS = [s.strip() for s in os.environ.get("SYMBOLS", "XAUUSD,EURUSD").split(",") if s.strip()]
-
-# ── Broker Time Zone ───────────────────────────────────────────────
-BROKER_UTC_OFFSET_HOURS: int = 2
-
-# ── Broker / Account Type ─────────────────────────────────────────
-# IC_MARKETS_RAW : IC Markets Raw Spread — raw ECN spread + $3.50/lot/side commission
-# ZERO_SPREAD    : HFM Zero Spread — raw spread + commission
-# PREMIUM / PRO  : HFM spread-based, no commission
+# Broker/account type: ZERO_SPREAD | IC_MARKETS_RAW | PREMIUM | PRO
+# Set BROKER_ACCOUNT_TYPE in .env to match your actual account.
 BROKER_ACCOUNT_TYPE: str = (
     os.environ.get("BROKER_ACCOUNT_TYPE")
     or os.environ.get("HFM_ACCOUNT_TYPE")
@@ -69,8 +45,30 @@ BROKER_ACCOUNT_TYPE: str = (
 ).upper()
 HFM_ACCOUNT_TYPE: str = BROKER_ACCOUNT_TYPE
 
-# ── IC Markets Raw Spread Account ─────────────────────────────────
-IC_COMMISSION_PER_LOT_USD: float = float(os.environ.get("IC_COMMISSION_PER_LOT_USD", "3.50"))
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
+NEWS_API_URL = os.environ.get("NEWS_API_URL", "")
+
+DASHBOARD_PASSWORD         = os.environ.get("DASHBOARD_PASSWORD", "")
+JWT_ACCESS_EXPIRES_MINUTES = int(os.environ.get("JWT_ACCESS_EXPIRES_MINUTES", "15"))
+JWT_REFRESH_EXPIRES_DAYS   = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS",   "7"))
+
+EMAIL_USER      = os.environ.get("EMAIL_USER",      "")
+EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD",  "")
+EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
+
+# ── ACCOUNT METADATA (informational, not secrets) ──────────────────
+ACCOUNT_NICKNAME        = "Demojose"
+LEVERAGE                = "1:400"
+MT5_PATH                = ""
+BROKER_UTC_OFFSET_HOURS: int = 2
+
+# ── SYMBOLS TO TRADE ───────────────────────────────────────────────
+# Add/remove symbols here. Each symbol needs a matching entry in
+# SCALPER_SYMBOL_SESSIONS, SCALPER_MIN/MAX_SL_PIPS, and SYMBOL_DIGITS below.
+SYMBOLS = ["XAUUSD", "EURUSD"]
+
+# ── IC Markets RAW commission table ────────────────────────────────
+IC_COMMISSION_PER_LOT_USD: float = 3.50
 IC_COMMISSION_USD: dict[str, float] = {
     "EURUSD": 3.50, "GBPUSD": 3.50, "USDJPY": 3.50,
     "AUDUSD": 3.50, "USDCHF": 3.50, "NZDUSD": 3.50,
@@ -95,42 +93,39 @@ MIN_RR              = 1.5
 # Maximum unique symbols that may have open trades simultaneously.
 # A new symbol can only open a trade if active_symbols < MAX_OPEN_SYMBOLS.
 # The final free slot is reserved for A-grade entries.
-MAX_OPEN_SYMBOLS: int = int(os.environ.get("MAX_OPEN_SYMBOLS", "5"))
+MAX_OPEN_SYMBOLS: int = 5
 
 # Per-symbol trade caps.
 # A/A+ trades: up to MAX_TRADES_PER_SYMBOL_A  (default 3)
 # B/C/D trades: 1 additional slot beyond the A-grade trades (total cap 4)
 # Hard per-symbol ceiling regardless of grade.
-MAX_TRADES_PER_SYMBOL_A:     int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A",   "3"))
-MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "4"))
-
-MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
+MAX_TRADES_PER_SYMBOL_A: int   = 3
+MAX_TRADES_PER_SYMBOL:   int   = 4
+MAX_LOT_SIZE:            float = 10.0
 
 # Absolute money-risk ceiling per trade as a fraction of balance.
 # Hard cap enforced AFTER lot sizing: if the realised SL risk of even the
 # broker-minimum lot exceeds this, the trade is REJECTED (fail closed).
-MAX_TRADE_RISK_PCT: float = float(os.environ.get("MAX_TRADE_RISK_PCT", "3.0"))
+MAX_TRADE_RISK_PCT: float = 3.0
 
 # ── Margin Safety ────────────────────────────────────────────────
-# NOTE: single source of truth — defined once here (was previously duplicated
-# lower in this file, which silently overrode this value).
-MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.5"))
+MARGIN_SAFETY_FACTOR:  float = 1.5
 # Minimum margin level (%) required before a new trade is allowed.
 # MT5 issues a margin call at 100%; we block well above that.
-MIN_MARGIN_LEVEL_PCT:    float = float(os.environ.get("MIN_MARGIN_LEVEL_PCT",    "200.0"))
+MIN_MARGIN_LEVEL_PCT:  float = 200.0
 
 # ── Portfolio Allocation ──────────────────────────────────────────
 # Always keep this fraction of equity reserved (free margin) for future setups.
-MARGIN_RESERVE_PCT:    float = float(os.environ.get("MARGIN_RESERVE_PCT",     "0.25"))
+MARGIN_RESERVE_PCT:    float = 0.25
 # Maximum total open exposure as fraction of equity.
-MAX_EQUITY_EXPOSURE:   float = float(os.environ.get("MAX_EQUITY_EXPOSURE",    "0.60"))
+MAX_EQUITY_EXPOSURE:   float = 0.60
 # Maximum correlated-currency exposure (trades sharing the same currency leg).
-MAX_CURRENCY_EXPOSURE: int   = int(os.environ.get("MAX_CURRENCY_EXPOSURE",    "3"))
+MAX_CURRENCY_EXPOSURE: int   = 3
 
 # ── Daily drawdown circuit breaker ────────────────────────────────
 # If equity drops this % below the day's opening equity, all new entries
 # are blocked for the rest of the UTC day. Open trades keep being managed.
-DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "6.0"))
+DAILY_DRAWDOWN_LIMIT_PCT: float = 6.0
 
 # ── SL buffer (pips) ─────────────────────────────────────────────
 EXTRA_PIPS_SL_DEFAULT = 3.0
@@ -145,8 +140,8 @@ ATR_COST_THRESHOLD         = 0.25
 
 NEWS_REFRESH_INTERVAL_MINUTES = 10
 
-# ZeroMQ endpoint
-ZMQ_ENDPOINT: str = os.environ.get("ZMQ_ENDPOINT", "tcp://127.0.0.1:5556")
+# ZeroMQ endpoint — MT5 EA publishes on this address; must match EA settings.
+ZMQ_ENDPOINT: str = "tcp://127.0.0.1:5556"
 
 # ── Symbol Metadata ───────────────────────────────────────────────
 SYMBOL_DIGITS: dict[str, int] = {
@@ -163,7 +158,7 @@ TICK_VALUE_USD: dict[str, float] = {
     "XAUUSD": 10.0, "XAGUSD":  5.0,
 }
 
-KES_PER_USD = float(os.environ.get("KES_PER_USD", "130.0"))
+KES_PER_USD: float = 130.0
 
 SYMBOL_CURRENCIES: dict[str, list[str]] = {
     "EURUSD": ["EUR", "USD"],
@@ -183,8 +178,8 @@ BREAKEVEN_RR_TRIGGER        = 1.5
 
 # Loss streak: tracked for analytics only — no trading pause enforced.
 # Set LOSS_STREAK_PAUSE_HOURS = 0 to disable pause (default).
-MAX_CONSECUTIVE_LOSSES      = int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "5"))   # streak length before pause
-LOSS_STREAK_PAUSE_HOURS     = float(os.environ.get("LOSS_STREAK_PAUSE_HOURS", "2"))  # per-symbol cooldown; set 0 to disable
+MAX_CONSECUTIVE_LOSSES:  int   = 5    # streak length before pause
+LOSS_STREAK_PAUSE_HOURS: float = 2.0  # per-symbol cooldown hours; set 0 to disable
 
 # ── Multi-level Take Profit ────────────────────────────────────────
 TIERED_TP_ENABLED        = True
@@ -211,10 +206,10 @@ TRADE_SCORE_THRESHOLD   = 2
 #   A   conf ≥ 0.70 OR  tq ≥ 0.65  →  RISK_MEDIUM_CONVICTION
 #   B   conf ≥ 0.60 OR  tq ≥ 0.50  →  RISK_LOW_CONVICTION
 #   C   otherwise                   →  RISK_MIN_CONVICTION
-RISK_HIGH_CONVICTION    = float(os.environ.get("RISK_HIGH_CONVICTION",    "2.5"))
-RISK_MEDIUM_CONVICTION  = float(os.environ.get("RISK_MEDIUM_CONVICTION",  "1.8"))
-RISK_LOW_CONVICTION     = float(os.environ.get("RISK_LOW_CONVICTION",     "1.0"))
-RISK_MIN_CONVICTION     = float(os.environ.get("RISK_MIN_CONVICTION",     "0.5"))
+RISK_HIGH_CONVICTION:   float = 2.5   # A+  conf ≥ 0.85 AND tq ≥ 0.75
+RISK_MEDIUM_CONVICTION: float = 1.8   # A   conf ≥ 0.70 OR  tq ≥ 0.65
+RISK_LOW_CONVICTION:    float = 1.0   # B   conf ≥ 0.60 OR  tq ≥ 0.50
+RISK_MIN_CONVICTION:    float = 0.5   # C   otherwise
 
 # ── TIME-BASED EXIT ───────────────────────────────────────────────
 MAX_TRADE_DURATION_MINUTES = 600
@@ -248,21 +243,14 @@ DASHBOARD_PORT    = 8080
 
 # Informational only — STREAM mode is event-driven (no fixed poll interval).
 # Surfaced/editable on the dashboard config tab; not used by the live loop.
-LOOP_INTERVAL_SECONDS: int = int(os.environ.get("LOOP_INTERVAL_SECONDS", "1"))
-
-# Initial balance used by the (optional) backtester and the dashboard's
-# backtest tab. Defaults to the configured account balance fallback.
-BACKTEST_INITIAL_BALANCE: float = float(
-    os.environ.get("BACKTEST_INITIAL_BALANCE", str(ACCOUNT_BALANCE))
-)
+LOOP_INTERVAL_SECONDS:    int   = 1
+BACKTEST_INITIAL_BALANCE: float = ACCOUNT_BALANCE
 
 # ── Email ─────────────────────────────────────────────────────────
 EMAIL_ENABLED   = True
-EMAIL_SMTP_HOST = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")
-EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", 587))
-EMAIL_USER      = os.environ.get("EMAIL_USER",      "")
-EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD",  "")
-EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
+EMAIL_SMTP_HOST = "smtp.gmail.com"
+EMAIL_SMTP_PORT = 587
+# EMAIL_USER / EMAIL_PASSWORD / EMAIL_RECIPIENT are read from .env above
 
 # ══════════════════════════════════════════════════════════════════
 #  STRATEGY-ENGINE CONFIG (PLACEHOLDER DEFAULTS)
@@ -279,12 +267,11 @@ EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
 #  SCALPER MODE — tighter targeting on M1/M5 momentum (engine-side)
 # ══════════════════════════════════════════════════════════════════
 
-SCALPER_MODE: bool = os.environ.get("SCALPER_MODE", "false").lower() == "true"
+SCALPER_MODE: bool = True
 
-# Legacy flat session window — kept for backward compat but overridden by
-# SCALPER_SYMBOL_SESSIONS below when per-symbol windows are defined.
-SCALPER_SESSION_START_UTC: int = int(os.environ.get("SCALPER_SESSION_START_UTC", "6"))
-SCALPER_SESSION_END_UTC:   int = int(os.environ.get("SCALPER_SESSION_END_UTC",   "16"))
+# Legacy flat session window — overridden by SCALPER_SYMBOL_SESSIONS per-symbol entries.
+SCALPER_SESSION_START_UTC: int = 6
+SCALPER_SESSION_END_UTC:   int = 16
 
 # ── Per-symbol session windows (UTC hour start, UTC hour end) ─────────────
 # Rationale per symbol:
@@ -319,7 +306,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.0"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable
+SCALPER_MIN_TICK_VELOCITY: float = 1.0  # ticks/sec — raise to 2.5 if too many low-quality signals appear
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
@@ -357,9 +344,9 @@ SCALPER_ATR_PRIMARY_SYMBOLS: set = {"XAUUSD"}
 #   ceiling= ATR × MAX_MULT   (stop never wider than this — cap risk)
 #   default= ATR × DEFAULT_MULT (used when no structural swing is available)
 # The result is ALSO clamped to the absolute SCALPER_MIN/MAX_SL_PIPS guards above.
-SCALPER_ATR_SL_MIN_MULT:     float = float(os.environ.get("SCALPER_ATR_SL_MIN_MULT",     "0.7"))
-SCALPER_ATR_SL_MAX_MULT:     float = float(os.environ.get("SCALPER_ATR_SL_MAX_MULT",     "1.5"))
-SCALPER_ATR_SL_DEFAULT_MULT: float = float(os.environ.get("SCALPER_ATR_SL_DEFAULT_MULT", "1.0"))
+SCALPER_ATR_SL_MIN_MULT:     float = 0.7
+SCALPER_ATR_SL_MAX_MULT:     float = 1.5
+SCALPER_ATR_SL_DEFAULT_MULT: float = 1.0
 
 # Per-symbol absolute spread cap (pips). Falls back to the global MAX_SPREAD_PIPS.
 # Gold spreads are naturally wide in pip terms ($0.01 pips), so it needs its own.
@@ -372,38 +359,31 @@ SCALPER_MAX_HOLD_MINUTES_PER_SYMBOL: dict = {
     "XAUUSD": 20,     # gold moves fast — shorter scalp window
 }
 
-SCALPER_TP1_RR: float = float(os.environ.get("SCALPER_TP1_RR", "1.5"))
-SCALPER_TP2_RR: float = float(os.environ.get("SCALPER_TP2_RR", "2.0"))
+SCALPER_TP1_RR: float = 1.5
+SCALPER_TP2_RR: float = 2.0
 
-SCALPER_MAX_HOLD_MINUTES: int = int(os.environ.get("SCALPER_MAX_HOLD_MINUTES", "30"))
+SCALPER_MAX_HOLD_MINUTES: int = 30
 
 # No hard daily trade cap — frequency is bounded by margin + EV gate only.
-# Set SCALPER_MAX_DAILY_TRADES = 0 to disable the cap entirely.
-SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "0"))
+# Set to a positive integer to cap trades per day per symbol.
+SCALPER_MAX_DAILY_TRADES: int = 0   # 0 = no cap
 
-# Kept for legacy env-var compatibility — no longer used by MarginManager.
-# Symbol and per-symbol limits are now controlled by MAX_OPEN_SYMBOLS,
-# MAX_TRADES_PER_SYMBOL, and MAX_TRADES_PER_SYMBOL_A defined above.
-SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "20"))
+# Legacy — no longer used by MarginManager (controlled by MAX_OPEN_SYMBOLS above).
+SCALPER_MAX_OPEN_TRADES: int = 20
 
-# Signal-quality gate thresholds. These are the floors that make the entry
-# gates MEANINGFUL — they must agree with the documented design. The entry
-# context scorer may relax them slightly within bounded floors (see
-# entry_context.py) but can never push them to noise level.
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
+# Signal-quality gate thresholds.
+SCALPER_MIN_ALIGNMENT_SCORE: float = 0.55
+SCALPER_MIN_TICK_SCORE:      float = 0.50
+SCALPER_MIN_CANDLE_SCORE:    float = 0.30
 
-# Entry context scorer — thresholds for autonomous gate adaptation
-ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
-ENTRY_TICK_CONFIRMS_MIN_BIAS:  float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_BIAS",  "0.20"))
-ENTRY_BURST_MOVE_THRESHOLD:    float = float(os.environ.get("ENTRY_BURST_MOVE_THRESHOLD",    "0.40"))
+# Entry context scorer thresholds.
+ENTRY_TICK_CONFIRMS_MIN_SCORE: float = 0.25
+ENTRY_TICK_CONFIRMS_MIN_BIAS:  float = 0.20
+ENTRY_BURST_MOVE_THRESHOLD:    float = 0.40
 
-SCALPER_M5_EMA_PERIOD: int = int(os.environ.get("SCALPER_M5_EMA_PERIOD", "10"))
-
-SCALPER_M1_CONSENSUS_MIN: int = int(os.environ.get("SCALPER_M1_CONSENSUS_MIN", "3"))
-
-SCALPER_ATR_SL_FRACTION: float = float(os.environ.get("SCALPER_ATR_SL_FRACTION", "0.4"))
+SCALPER_M5_EMA_PERIOD:    int   = 10
+SCALPER_M1_CONSENSUS_MIN: int   = 3
+SCALPER_ATR_SL_FRACTION:  float = 0.4
 
 # ── TP ratios (for entry_gate.py) ─────────────────────────────────
 TP1_RR_RATIO: float = SCALPER_TP1_RR
@@ -414,68 +394,45 @@ TP2_RR_RATIO: float = SCALPER_TP2_RR
 # (day-12: only 2/13 hit TP1 while 6/13 reached ≥5 pips of favourable move).
 # When enabled, TP1/TP2 are pulled in to the NEAREST reachable target:
 #   min( fixed RR , next opposing swing − buffer , ATR horizon cap ).
-TP_STRUCTURE_AWARE: bool = os.environ.get("TP_STRUCTURE_AWARE", "true").lower() == "true"
-# Cap TP at this multiple of the M5 ATR — a realistic scalp horizon.
-TP1_ATR_CAP_MULT: float = float(os.environ.get("TP1_ATR_CAP_MULT", "1.5"))
-# Exit this many pips BEFORE the opposing swing (don't sit at the level where
-# liquidity rests / price reverses). Per-symbol pip units (gold pip = $0.01).
-TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.0"))
-# Minimum reward:risk accepted AFTER capping. A reachable target below this is
-# not worth the risk → trade rejected. (MIN_RR stays the nominal/aspirational.)
-MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.0"))
+TP_STRUCTURE_AWARE:    bool  = True
+TP1_ATR_CAP_MULT:      float = 1.5
+TP_STRUCT_BUFFER_PIPS: float = 1.0
+MIN_RR_FLOOR:          float = 1.0
 
-# ── Entry gate strategy flag ──────────────────────────────────────
-# SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
-# places NO trades until STRATEGY_GATE_ENABLED=true is set explicitly in .env.
-# A losing/uncertain system must earn the right to trade live.
+# ── Entry gate — live trading switch ─────────────────────────────
+# SAFE DEFAULT: false = observation mode.  The bot logs every signal but
+# places NO orders until you change this to True (or set STRATEGY_GATE_ENABLED=true
+# in .env to override without editing code).
 STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "false").lower() == "true"
 
 # ── Tick Analytics ────────────────────────────────────────────────
-# Set any of these to "false" in .env to disable that subsystem.
-# All default to true so the feature is on out of the box.
-TICK_ANALYTICS_ENABLED:   bool = os.environ.get("TICK_ANALYTICS_ENABLED",   "true").lower() == "true"
-TICK_ANALYTICS_SAVE:      bool = os.environ.get("TICK_ANALYTICS_SAVE",      "true").lower() == "true"
-TICK_ANALYTICS_SCHEDULE:  bool = os.environ.get("TICK_ANALYTICS_SCHEDULE",  "true").lower() == "true"
+TICK_ANALYTICS_ENABLED:  bool = True
+TICK_ANALYTICS_SAVE:     bool = True
+TICK_ANALYTICS_SCHEDULE: bool = True
 
 # ── EV (Expected Value) gate ──────────────────────────────────────
-# Minimum expected value in pips for a trade to be taken.
-# EV = (estimated_win_rate × avg_win_pips) − ((1 − win_rate) × avg_loss_pips)
-# Uses rolling win rate from tick analytics if available; falls back to
-# ASSUMED_WIN_RATE. A positive EV confirms the edge is real after costs.
-# ASSUMED_WIN_RATE is ONLY used before enough real closed trades exist. Once
-# EV_MIN_SAMPLES broker-truth outcomes are recorded for a symbol, the EV gate
-# switches to the measured rolling win rate / avg win / avg loss instead.
-# During the bootstrap phase a conservative haircut is applied so the bot does
-# not assume an edge it has not demonstrated.
-ASSUMED_WIN_RATE:        float = float(os.environ.get("ASSUMED_WIN_RATE",        "0.50"))
-ASSUMED_WIN_RATE_HAIRCUT: float = float(os.environ.get("ASSUMED_WIN_RATE_HAIRCUT", "0.05"))
-EV_MIN_PIPS:             float = float(os.environ.get("EV_MIN_PIPS",             "0.10"))
-EV_ROLLING_WINDOW:       int   = int(os.environ.get("EV_ROLLING_WINDOW",         "50"))
-EV_MIN_SAMPLES:          int   = int(os.environ.get("EV_MIN_SAMPLES",            "30"))
-# Expected exit R used to model the tiered TP plan in the EV gate's avg_win.
-# Conservative default for the runner = TP1 RR (assume the runner gives back to TP1).
-RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",          str(SCALPER_TP1_RR)))
+# EV = (win_rate × avg_win_pips) − ((1 − win_rate) × avg_loss_pips)
+# Switches from ASSUMED_WIN_RATE to measured rolling rate once EV_MIN_SAMPLES
+# closed trades are recorded per symbol.
+ASSUMED_WIN_RATE:         float = 0.50
+ASSUMED_WIN_RATE_HAIRCUT: float = 0.05   # bootstrap haircut
+EV_MIN_PIPS:              float = 0.10
+EV_ROLLING_WINDOW:        int   = 50
+EV_MIN_SAMPLES:           int   = 30
+RUNNER_EXIT_RR:           float = SCALPER_TP1_RR
 
 # ── Exploration bootstrap ─────────────────────────────────────────
-# The EV gate refuses negative-EV trades, but a brand-new system has no
-# broker-truth samples to compute EV from (cold-start). To break that deadlock
-# WITHOUT weakening any other protection, allow a small, capped number of
-# minimum-risk "exploration" trades per symbol per day that bypass ONLY the EV
-# edge requirement (every other gate — news, spread/cost, margin, R:R, session,
-# velocity — still applies). These gather real outcomes so the rolling EV can
-# take over. Exploration trades are forced to the lowest risk grade.
-EXPLORATION_ENABLED:        bool = os.environ.get("EXPLORATION_ENABLED", "true").lower() == "true"
-EXPLORATION_TRADES_PER_DAY: int  = int(os.environ.get("EXPLORATION_TRADES_PER_DAY", "8"))  # per symbol
+# Allows a small number of minimum-risk trades per day that bypass ONLY the
+# EV requirement while the system builds its first real sample of outcomes.
+# Every other gate (news, spread, margin, R:R, session, velocity) still applies.
+EXPLORATION_ENABLED:        bool = True
+EXPLORATION_TRADES_PER_DAY: int  = 8   # per symbol
 
 # ── Reversal re-entry cooldown ────────────────────────────────────
-# After a reversal/structural-reversal exit, block ALL new entries on that
-# symbol for this many seconds to avoid whipsaw churn in chop.
-REVERSAL_REENTRY_COOLDOWN_SEC: int = int(os.environ.get("REVERSAL_REENTRY_COOLDOWN_SEC", "120"))
+REVERSAL_REENTRY_COOLDOWN_SEC: int = 120
 
 # ── Ranging-regime suppression ────────────────────────────────────
-# In a detected ranging regime, require a higher alignment score (add this to
-# the effective threshold). Ranging M1 chop is the main source of false signals.
-RANGING_ALIGN_PENALTY: float = float(os.environ.get("RANGING_ALIGN_PENALTY", "0.10"))
+RANGING_ALIGN_PENALTY: float = 0.10
 
 # ── Spread / cost gate ────────────────────────────────────────────
 # Round-trip cost (spread + commission) must be no more than this fraction of
