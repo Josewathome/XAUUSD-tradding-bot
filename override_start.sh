@@ -58,76 +58,96 @@ else
     show_message "[0/6] kasmvnc.yaml not found — VNC thread patch skipped."
 fi
 
-# ── [0/6] Restore experts.ini whitelist (127.0.0.1 socket access) ─
-# MT5 stores the "Allow WebRequest for listed URL" entries in an encrypted
-# binary Config/experts.ini keyed to the MachineGuid. Without 127.0.0.1 in
-# the list, SocketConnect returns err=4014 and the EA never connects.
-# Since MachineGuid is pinned (constant across restarts), the encrypted blob
-# remains valid — so we can back it up once (after the operator adds 127.0.0.1
-# via VNC) and restore it on every subsequent start.
+# ── [0/6] Restore WebRequest whitelist (127.0.0.1 socket access) ──
+# MT5 stores the "Allow WebRequest for listed URL" setting in an encrypted
+# binary file keyed to MachineGuid. The exact filename varies by MT5 build:
+#   - older builds: Config/experts.ini
+#   - newer builds (5.0.37+): Config/terminal.ini  ← this container
+# Without 127.0.0.1 in the list, SocketConnect returns err=4014.
+# Since MachineGuid is pinned, the encrypted blob stays valid across restarts.
+# Strategy: back up the FULL Config/ directory once (first run after operator
+# sets the URL), then restore it on every subsequent start before MT5 launches.
 _MT5_CONFIG_DIR_EARLY="/config/.wine/drive_c/Program Files/MetaTrader 5/Config"
 EXPERTS_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/experts.ini"
+TERMINAL_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/terminal.ini"
 EXPERTS_INI_BACKUP="/config/experts_ini.bak"
-# Fresh-volume fallback: if a full Config/ backup exists but the live Config has
-# no experts.ini, restore the backed-up files we don't already have (preserves
-# the whitelist whichever file carries it on this build).
-if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+TERMINAL_INI_BACKUP="/config/terminal_ini.bak"
+
+# Restore from per-file backups first (most reliable, explicitly saved).
+_restored=0
+if [ -f "${TERMINAL_INI_BACKUP}" ]; then
+    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+    cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}"
+    show_message "[0/6] terminal.ini restored from backup (whitelist preserved)."
+    _restored=1
+fi
+if [ -f "${EXPERTS_INI_BACKUP}" ]; then
+    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+    show_message "[0/6] experts.ini restored from backup (whitelist preserved)."
+    _restored=1
+fi
+# Fall back to full Config/ directory backup.
+if [ "${_restored}" -eq 0 ] && [ -d /config/mt5_config_backup ]; then
     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
     cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
     show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
+    _restored=1
 fi
-if [ -f "${EXPERTS_INI_BACKUP}" ]; then
-    # Always restore from backup — MT5 overwrites experts.ini on every startup,
-    # resetting the WebRequest whitelist. The backup is the only source of truth.
-    mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
-    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-    show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
-elif [ -d /config/mt5_config_backup ]; then
-    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-    cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
-    show_message "[0/6] experts.ini restored from full Config backup."
-else
-    show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
+if [ "${_restored}" -eq 0 ]; then
+    show_message "[0/6] No whitelist backup yet — will save after ready_to_trade."
 fi
 
-# ── [0/6] experts.ini watcher — start BEFORE MT5 so it catches MT5's overwrite ─
-# MT5 overwrites experts.ini seconds after launch, erasing the WebRequest
-# whitelist. By starting this watcher NOW (before [3/6]), it detects the shrink
-# within 10s and restores the backup before the EA's first SocketConnect retry.
-# It also handles the first-run case: when the operator adds 127.0.0.1 via VNC
-# and clicks OK, experts.ini grows → watcher backs it up for future restarts.
+# ── [0/6] Whitelist watcher — protects terminal.ini and experts.ini ──
+# MT5 overwrites these files on every launch, erasing the WebRequest whitelist.
+# This watcher (started before MT5) detects any overwrite within 10s and
+# restores the backup, keeping the whitelist alive through MT5's startup resets.
 (
-    # The backup is the ground truth — created once by the operator after
-    # adding the URL in VNC (see first-run instructions). The watcher's ONLY
-    # job is to restore from that backup whenever MT5 overwrites or deletes
-    # experts.ini. It never auto-updates the backup (experts.ini is an
-    # encrypted binary; we cannot tell MT5's reset version from the correct one).
-    _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+    _watcher_config_dir="${_MT5_CONFIG_DIR_EARLY}"
+    _t_bak="${TERMINAL_INI_BACKUP}"
+    _t_live="${TERMINAL_INI_LIVE}"
+    _e_bak="${EXPERTS_INI_BACKUP}"
+    _e_live="${EXPERTS_INI_LIVE}"
+    _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
+    _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
     while true; do
         sleep 10
-        if [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
-            # No backup yet — nothing to restore; wait for operator to create it.
-            continue
-        fi
-        if [ -f "${EXPERTS_INI_LIVE}" ]; then
-            _cur_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-            if [ "${_cur_mtime}" -gt "${_last_live_mtime}" ]; then
-                # experts.ini was modified (MT5 startup overwrite or any other write) → restore backup
-                cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-                _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-                show_message "[experts-watcher] experts.ini changed — restored backup (whitelist preserved)."
+        # terminal.ini guard
+        if [ -f "${_t_bak}" ]; then
+            if [ -f "${_t_live}" ]; then
+                _cur=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
+                if [ "${_cur}" -gt "${_last_t}" ]; then
+                    cp "${_t_bak}" "${_t_live}"
+                    _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
+                    show_message "[whitelist-watcher] terminal.ini changed — restored backup."
+                fi
+            else
+                mkdir -p "${_watcher_config_dir}"
+                cp "${_t_bak}" "${_t_live}"
+                _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
+                show_message "[whitelist-watcher] terminal.ini missing — restored from backup."
             fi
-        else
-            # experts.ini vanished — restore it
-            mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
-            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-            _last_live_mtime=$(stat -c%Y "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-            show_message "[experts-watcher] experts.ini missing — restored from backup."
+        fi
+        # experts.ini guard (older build fallback)
+        if [ -f "${_e_bak}" ]; then
+            if [ -f "${_e_live}" ]; then
+                _cur=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
+                if [ "${_cur}" -gt "${_last_e}" ]; then
+                    cp "${_e_bak}" "${_e_live}"
+                    _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
+                    show_message "[whitelist-watcher] experts.ini changed — restored backup."
+                fi
+            else
+                mkdir -p "${_watcher_config_dir}"
+                cp "${_e_bak}" "${_e_live}"
+                _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
+                show_message "[whitelist-watcher] experts.ini missing — restored from backup."
+            fi
         fi
     done
 ) &
 _experts_watcher_pid=$!
-show_message "[0/6] experts.ini watcher started (pid ${_experts_watcher_pid}) — snapshotted current whitelist, will catch MT5 overwrite."
+show_message "[0/6] Whitelist watcher started (pid ${_experts_watcher_pid}) — guards terminal.ini + experts.ini against MT5 reset."
 
 # EA auto-start on this build is handled by the [StartUp] /config: mechanism
 # (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
@@ -686,46 +706,49 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Back up the whitelist — ONLY on first run (no backup exists yet).
-# NEVER overwrite an existing backup: the backup is the ground truth for the
-# whitelist. MT5 resets experts.ini on every startup; overwriting the backup
-# with the post-reset live file permanently poisons it, causing every restart
-# to restore a no-whitelist version and break SocketConnect (err=4014).
-# To force a re-capture (e.g. after adding more URLs), delete
-# /config/experts_ini.bak and restart.
+# Save whitelist backups — ONLY on first run (no backups exist yet).
+# NEVER overwrite existing backups: they are the ground truth. MT5 resets
+# terminal.ini and experts.ini on every startup; overwriting the backup with
+# the post-reset live file permanently breaks SocketConnect (err=4014).
+# To force a re-capture (e.g. after changing the URL list), delete
+# /config/terminal_ini.bak (and /config/experts_ini.bak) then restart.
 _need_first_backup=0
-if [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
-    # Also check whether the full Config backup already has experts.ini.
-    if [ ! -f "/config/mt5_config_backup/experts.ini" ]; then
+if [ ! -f "${TERMINAL_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
+    if [ ! -f "/config/mt5_config_backup/terminal.ini" ] && \
+       [ ! -f "/config/mt5_config_backup/experts.ini" ]; then
         _need_first_backup=1
     fi
 fi
 
 if [ "${_need_first_backup}" -eq 1 ]; then
-    # First run: wait for the operator to add http://127.0.0.1 via VNC and
-    # confirm in Options → Expert Advisors → Allow WebRequest, then OK.
-    _backup_wait=0
-    while [ ! -f "${EXPERTS_INI_LIVE}" ] && [ ${_backup_wait} -lt 60 ]; do
-        sleep 5
-        _backup_wait=$((_backup_wait + 5))
-    done
+    # First run: wait briefly for MT5 to settle after the operator sets the URL.
+    sleep 10
+    # Back up whichever files exist now — terminal.ini on this build.
+    _backed=0
+    if [ -f "${TERMINAL_INI_LIVE}" ]; then
+        cp "${TERMINAL_INI_LIVE}" "${TERMINAL_INI_BACKUP}"
+        show_message "terminal.ini backed up — whitelist will auto-restore on future starts."
+        _backed=1
+    fi
     if [ -f "${EXPERTS_INI_LIVE}" ]; then
         cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+        show_message "experts.ini backed up — whitelist will auto-restore on future starts."
+        _backed=1
+    fi
+    # Always save a full Config/ snapshot as belt-and-suspenders fallback.
+    if [ -d "${MT5_CONFIG_DIR}" ]; then
         rm -rf /config/mt5_config_backup
         cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-        show_message "experts.ini backed up — whitelist will auto-restore on future starts."
-    else
-        show_message "WARNING: experts.ini not found after ${_backup_wait}s."
-        show_message "  Did you add http://127.0.0.1 in Options → Expert Advisors → Allow WebRequest?"
-        show_message "  The EA will fail with err=4014 until you do this and restart the container."
-        if [ -d "${MT5_CONFIG_DIR}" ]; then
-            rm -rf /config/mt5_config_backup
-            cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-            show_message "Full Config/ backed up (experts.ini absent — whitelist not yet set)."
+        if [ "${_backed}" -eq 1 ]; then
+            show_message "Full Config/ also backed up as fallback."
+        else
+            show_message "WARNING: neither terminal.ini nor experts.ini found."
+            show_message "  Add http://127.0.0.1 in Options → Expert Advisors → Allow WebRequest,"
+            show_message "  then delete /config/terminal_ini.bak and restart to re-capture."
         fi
     fi
 else
-    show_message "Whitelist backup already present — skipping re-capture (whitelist preserved)."
+    show_message "Whitelist backups already present — skipping re-capture (whitelist preserved)."
 fi
 
 # ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
