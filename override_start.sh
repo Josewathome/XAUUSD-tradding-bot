@@ -686,27 +686,46 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Back up the whitelist. Wait up to 60s for experts.ini to appear in case
-# MT5 hasn't written it yet (it writes on Options → OK, not on startup).
-_backup_wait=0
-while [ ! -f "${EXPERTS_INI_LIVE}" ] && [ ${_backup_wait} -lt 60 ]; do
-    sleep 5
-    _backup_wait=$((_backup_wait + 5))
-done
-if [ -f "${EXPERTS_INI_LIVE}" ]; then
-    cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-    rm -rf /config/mt5_config_backup
-    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-    show_message "experts.ini backed up — whitelist will auto-restore on future starts."
-else
-    show_message "WARNING: experts.ini not found after ${_backup_wait}s."
-    show_message "  Did you add http://127.0.0.1 in Options → Expert Advisors → Allow WebRequest?"
-    show_message "  The EA will fail with err=4014 until you do this and restart the container."
-    if [ -d "${MT5_CONFIG_DIR}" ]; then
+# Back up the whitelist — ONLY on first run (no backup exists yet).
+# NEVER overwrite an existing backup: the backup is the ground truth for the
+# whitelist. MT5 resets experts.ini on every startup; overwriting the backup
+# with the post-reset live file permanently poisons it, causing every restart
+# to restore a no-whitelist version and break SocketConnect (err=4014).
+# To force a re-capture (e.g. after adding more URLs), delete
+# /config/experts_ini.bak and restart.
+_need_first_backup=0
+if [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
+    # Also check whether the full Config backup already has experts.ini.
+    if [ ! -f "/config/mt5_config_backup/experts.ini" ]; then
+        _need_first_backup=1
+    fi
+fi
+
+if [ "${_need_first_backup}" -eq 1 ]; then
+    # First run: wait for the operator to add http://127.0.0.1 via VNC and
+    # confirm in Options → Expert Advisors → Allow WebRequest, then OK.
+    _backup_wait=0
+    while [ ! -f "${EXPERTS_INI_LIVE}" ] && [ ${_backup_wait} -lt 60 ]; do
+        sleep 5
+        _backup_wait=$((_backup_wait + 5))
+    done
+    if [ -f "${EXPERTS_INI_LIVE}" ]; then
+        cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
         rm -rf /config/mt5_config_backup
         cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-        show_message "Full Config/ backed up (experts.ini absent — whitelist not yet set)."
+        show_message "experts.ini backed up — whitelist will auto-restore on future starts."
+    else
+        show_message "WARNING: experts.ini not found after ${_backup_wait}s."
+        show_message "  Did you add http://127.0.0.1 in Options → Expert Advisors → Allow WebRequest?"
+        show_message "  The EA will fail with err=4014 until you do this and restart the container."
+        if [ -d "${MT5_CONFIG_DIR}" ]; then
+            rm -rf /config/mt5_config_backup
+            cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+            show_message "Full Config/ backed up (experts.ini absent — whitelist not yet set)."
+        fi
     fi
+else
+    show_message "Whitelist backup already present — skipping re-capture (whitelist preserved)."
 fi
 
 # ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
