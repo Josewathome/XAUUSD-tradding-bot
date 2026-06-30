@@ -76,20 +76,16 @@ if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
     cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
     show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
 fi
-if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+if [ -f "${EXPERTS_INI_BACKUP}" ]; then
+    # Always restore from backup — MT5 overwrites experts.ini on every startup,
+    # resetting the WebRequest whitelist. The backup is the only source of truth.
     mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
     cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
     show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
-elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
-    # If the live file is smaller than the backup it was probably reset by MT5 — restore.
-    _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-    _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
-    if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
-        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-        show_message "[0/6] experts.ini restored from backup (live file was smaller/reset)."
-    else
-        show_message "[0/6] experts.ini live file OK."
-    fi
+elif [ -d /config/mt5_config_backup ]; then
+    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+    cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
+    show_message "[0/6] experts.ini restored from full Config backup."
 else
     show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
 fi
