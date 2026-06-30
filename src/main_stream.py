@@ -66,8 +66,9 @@ from src.infrastructure.stream.zmq_feed             import ZmqFeed, FEED_STOPPED
 from src.infrastructure.stream.streaming_market_data_repo import StreamingMarketDataRepo
 from src.domain.entities                            import Timeframe
 from src.strategy.interfaces                        import IStrategyEngine, ITradeGuardian
-from src.strategy.placeholder_engine               import PlaceholderStrategyEngine
-from src.strategy.placeholder_guardian             import PlaceholderTradeGuardian
+from src.strategy.xauusd_engine                    import XAUUSDStrategyEngine, XAUUSDTradeGuardian
+from src.strategy.eurusd_engine                    import EURUSDStrategyEngine, EURUSDTradeGuardian
+from src.strategy.multi_engine                     import MultiSymbolEngine, MultiSymbolGuardian
 
 logger = logging.getLogger("main_stream")
 
@@ -88,13 +89,18 @@ _SEED_COUNTS: Dict[Timeframe, int] = {
 # engine emits no signals and the guardian issues no exit decisions.
 
 def build_engine(symbols) -> IStrategyEngine:
-    """Construct the strategy engine. Swap PlaceholderStrategyEngine for the real one."""
-    return PlaceholderStrategyEngine(symbols=symbols)
+    xau_syms = [s for s in symbols if s == "XAUUSD"]
+    eur_syms = [s for s in symbols if s == "EURUSD"]
+    engines = {}
+    if xau_syms:
+        engines["XAUUSD"] = XAUUSDStrategyEngine(symbols=xau_syms)
+    if eur_syms:
+        engines["EURUSD"] = EURUSDStrategyEngine(symbols=eur_syms)
+    return MultiSymbolEngine(engines)
 
 
 def build_guardian() -> ITradeGuardian:
-    """Construct the open-trade guardian. Swap PlaceholderTradeGuardian for the real one."""
-    return PlaceholderTradeGuardian()
+    return MultiSymbolGuardian([XAUUSDTradeGuardian(), EURUSDTradeGuardian()])
 
 
 # ── Inline helpers ─────────────────────────────────────────────────────────────
@@ -111,6 +117,30 @@ def _setup_logging() -> None:
             logging.FileHandler("logs/trading_bot.log", encoding="utf-8"),
         ],
     )
+    _attach_signal_log("signal.XAUUSD", "logs/signals_XAUUSD.log")
+    _attach_signal_log("signal.EURUSD", "logs/signals_EURUSD.log")
+    _attach_signal_log("signal.XAUUSD", "logs/signals_combined.log")
+    _attach_signal_log("signal.EURUSD", "logs/signals_combined.log")
+
+
+def _attach_signal_log(logger_name: str, filepath: str) -> None:
+    """Attach a dedicated FileHandler to a signal logger (idempotent)."""
+    sig_logger = logging.getLogger(logger_name)
+    sig_logger.setLevel(logging.DEBUG)
+    # avoid duplicate handlers if called more than once
+    for h in sig_logger.handlers:
+        if isinstance(h, logging.FileHandler) and h.baseFilename.endswith(
+            filepath.replace("/", "").replace("\\", "")
+        ):
+            return
+    fh = logging.FileHandler(filepath, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    sig_logger.addHandler(fh)
+    sig_logger.propagate = True  # also flows into trading_bot.log
 
 
 def _send_mt5_failure_email() -> None:

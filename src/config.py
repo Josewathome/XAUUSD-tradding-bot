@@ -53,7 +53,7 @@ JWT_REFRESH_EXPIRES_DAYS    = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS", "7"
 # This is an XAUUSD-focused bot. The framework is multi-symbol capable —
 # add more symbols here (and matching SYMBOL_DIGITS / TICK_VALUE_USD /
 # SCALPER_SYMBOL_SESSIONS entries below) if the strategy engine supports them.
-SYMBOLS = [s.strip() for s in os.environ.get("SYMBOLS", "XAUUSD").split(",") if s.strip()]
+SYMBOLS = [s.strip() for s in os.environ.get("SYMBOLS", "XAUUSD,EURUSD").split(",") if s.strip()]
 
 # ── Broker Time Zone ───────────────────────────────────────────────
 BROKER_UTC_OFFSET_HOURS: int = 2
@@ -302,6 +302,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
     "USDJPY": (0,  19),   # Full Asian + London + NY afternoon (extended from 17)
     "AUDUSD": (22, 13),   # Sydney open (wraps midnight) → London midday
     "USDCHF": (5,  19),   # European pair — extended to match GBPUSD NY afternoon
+    "EURUSD": (10, 13),   # London Breakout window only (Asian range 02–10, breakout 10–13)
 }
 
 # ── Tick velocity gate ────────────────────────────────────────────────────
