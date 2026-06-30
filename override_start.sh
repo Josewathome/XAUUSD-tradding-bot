@@ -90,6 +90,43 @@ else
     show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
 fi
 
+# ── [0/6] experts.ini watcher — start BEFORE MT5 so it catches MT5's overwrite ─
+# MT5 overwrites experts.ini seconds after launch, erasing the WebRequest
+# whitelist. By starting this watcher NOW (before [3/6]), it detects the shrink
+# within 10s and restores the backup before the EA's first SocketConnect retry.
+# It also handles the first-run case: when the operator adds 127.0.0.1 via VNC
+# and clicks OK, experts.ini grows → watcher backs it up for future restarts.
+(
+    _bak_known_size=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+    while true; do
+        sleep 10
+        if [ -f "${EXPERTS_INI_LIVE}" ]; then
+            _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+            if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
+                # experts.ini grew — user added a URL; back it up
+                cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+                if [ -d "${MT5_CONFIG_DIR:-${_MT5_CONFIG_DIR_EARLY}}" ]; then
+                    rm -rf /config/mt5_config_backup
+                    cp -r "${MT5_CONFIG_DIR:-${_MT5_CONFIG_DIR_EARLY}}" /config/mt5_config_backup 2>/dev/null || true
+                fi
+                _bak_known_size="${_cur_size}"
+                show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
+            elif [ "${_cur_size}" -lt "${_bak_known_size}" ] && [ "${_bak_known_size}" -gt 0 ]; then
+                # experts.ini shrank — MT5 overwrote it after launch → restore backup
+                cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+                show_message "[experts-watcher] experts.ini overwrite detected — backup restored (whitelist preserved)."
+            fi
+        elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ "${_bak_known_size}" -gt 0 ]; then
+            # experts.ini vanished entirely — restore it
+            mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
+            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+            show_message "[experts-watcher] experts.ini missing — restored from backup."
+        fi
+    done
+) &
+_experts_watcher_pid=$!
+show_message "[0/6] experts.ini watcher started (pid ${_experts_watcher_pid}) — will catch MT5 overwrite."
+
 # EA auto-start on this build is handled by the [StartUp] /config: mechanism
 # (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
 # every launch — no reliance on MT5 persisting profile/.chr/order.wnd to disk
@@ -879,42 +916,6 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
-# ── experts.ini backup daemon ─────────────────────────────────────
-# The operator adds 127.0.0.1 to the WebRequest whitelist AFTER ready_to_trade,
-# so the one-shot backup above always runs too early and captures nothing.
-# This background loop watches for experts.ini to appear or grow (MT5 writes it
-# when Options → Expert Advisors → Allow WebRequest URL is saved) and backs it
-# up immediately. On the next restart the [0/6] restore block finds the backup
-# and 127.0.0.1 is already whitelisted — EA connects without any manual steps.
-(
-    _bak_known_size=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
-    while true; do
-        sleep 10
-        if [ -f "${EXPERTS_INI_LIVE}" ]; then
-            _cur_size=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-            if [ "${_cur_size}" -gt "${_bak_known_size}" ]; then
-                # experts.ini grew — user added a URL or saved Options → back it up
-                cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-                if [ -d "${MT5_CONFIG_DIR}" ]; then
-                    rm -rf /config/mt5_config_backup
-                    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-                fi
-                _bak_known_size="${_cur_size}"
-                show_message "[experts-watcher] experts.ini backed up (${_cur_size} bytes) — whitelist will persist across restarts."
-            elif [ "${_cur_size}" -lt "${_bak_known_size}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-                # experts.ini shrank — MT5 reset it after a hard kill → restore backup immediately
-                cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-                show_message "[experts-watcher] experts.ini reset detected — restored backup (whitelist re-applied)."
-            fi
-        elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ "${_bak_known_size}" -gt 0 ]; then
-            # experts.ini vanished entirely — restore it
-            mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
-            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-            show_message "[experts-watcher] experts.ini missing — restored from backup."
-        fi
-    done
-) &
-
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
 # empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
@@ -1126,8 +1127,9 @@ fi
 # relaunch MT5 mid-shutdown.
 _graceful_shutdown() {
     show_message "Container stopping — closing MT5 cleanly so it saves the chart+EA session..."
-    # Stop the watchdog so it doesn't relaunch MT5 while we're closing it.
+    # Stop the watchdog and experts-watcher so they don't interfere with shutdown.
     [ -n "${_watchdog_pid:-}" ] && kill "${_watchdog_pid}" 2>/dev/null || true
+    [ -n "${_experts_watcher_pid:-}" ] && kill "${_experts_watcher_pid}" 2>/dev/null || true
     # Clean close (NO /F): lets MT5 write its profile/lastsession with the EA.
     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
         $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
