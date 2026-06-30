@@ -763,7 +763,7 @@ if __name__ == "__main__":
     logger.info("  Symbols : %s", ", ".join(config.SYMBOLS))
     logger.info("  Risk    : %.1f%%  |  MinRR: %.1f", config.RISK_PERCENT, config.MIN_RR)
     logger.info("  ZMQ     : %s", ZMQ_ENDPOINT)
-    logger.info("  Strategy: placeholder engine — no signals until a real IStrategyEngine is wired")
+    logger.info("  Strategy: XAUUSD (structure+scalp) + EURUSD (London breakout)")
     logger.info("-" * 50)
     logger.info("Mode: LIVE STREAM")
     run_stream()
