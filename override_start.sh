@@ -43,16 +43,7 @@ check_dependency "$wine_executable"
 if ! command -v unzip &>/dev/null; then
     apt-get install -y --no-install-recommends unzip 2>/dev/null || true
 fi
-# xdotool is needed to automate the MT5 Options dialog (WebRequest whitelist).
-if ! command -v xdotool &>/dev/null; then
-    apt-get update -qq 2>/dev/null || true
-    apt-get install -y --no-install-recommends xdotool 2>/dev/null || true
-    if ! command -v xdotool &>/dev/null; then
-        show_message "WARNING: xdotool install failed — GUI automation will be skipped."
-    else
-        show_message "xdotool installed successfully."
-    fi
-fi
+# GUI automation uses pure Python3 + libX11/libXtst (ctypes) — no xdotool needed.
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
 KASMVNC_CFG="${HOME}/.vnc/kasmvnc.yaml"
@@ -898,118 +889,162 @@ _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
 # ── Automate MT5 Options → Expert Advisors settings via GUI ──────────
-# Opens Tools → Options → Expert Advisors tab and enables:
+# Uses pure Python3 + ctypes (libX11 + libXtst) — no xdotool install needed.
+# Opens Tools → Options → Expert Advisors and enables:
 #   - Allow DLL imports
-#   - Allow WebRequest for listed URL  → adds http://127.0.0.1
-# This is more reliable than patching settings.ini because MT5 writes
-# the changes itself and they survive its own init reset cycle.
-#
-# MT5 Expert Advisors tab (Options dialog) tab order:
-#   1. Allow automated trading (checkbox)
-#   2. Disable when account changed (checkbox)
-#   3. Disable when profile changed (checkbox)
-#   4. Allow DLL imports (checkbox)       ← we check this
-#   5. Allow imports of external experts (checkbox)
-#   6. Allow WebRequest for listed URL (checkbox)  ← we check this
-#   7. URL listbox
-#   8. Add button                         ← we click this
-#   9. Delete button
-#  10. OK button
+#   - Allow WebRequest for listed URL → adds http://127.0.0.1
 _set_mt5_ea_options() {
-    if ! command -v xdotool &>/dev/null; then
-        show_message "[ea-options] xdotool not available — skipping GUI automation."
-        return 0
-    fi
+    DISPLAY=:1 python3 - <<'_PY_EA_OPTIONS'
+import ctypes, ctypes.util, sys, time, os
 
-    # Find MT5 window (wait up to 60s for it to appear)
-    local _win="" _elapsed=0
-    while [ -z "${_win}" ] && [ ${_elapsed} -lt 60 ]; do
-        _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null | head -1 || true)
-        if [ -z "${_win}" ]; then
-            _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
-                | while read -r _wid; do
-                    _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
-                    case "${_wn}" in
-                        *[Mm]eta*|*[Tt]rader*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
-                    esac
-                  done | head -1 || true)
-        fi
-        [ -z "${_win}" ] && sleep 3 && _elapsed=$((_elapsed + 3))
-    done
+# ── Load X11 and Xtst ────────────────────────────────────────────
+try:
+    _x11 = ctypes.CDLL('libX11.so.6')
+    _xtst = ctypes.CDLL('libXtst.so.6')
+except OSError as e:
+    print(f'[ea-options] libX11/libXtst not available: {e}')
+    sys.exit(0)  # non-fatal
 
-    if [ -z "${_win}" ]; then
-        show_message "[ea-options] MT5 window not found — cannot automate Options dialog."
-        return 1
-    fi
-    local _wt
-    _wt=$(DISPLAY=:1 xdotool getwindowname "${_win}" 2>/dev/null || true)
-    show_message "[ea-options] MT5 window found: id=${_win} title='${_wt}'"
+# Set up return/arg types
+_x11.XOpenDisplay.restype = ctypes.c_void_p
+_x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+_x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+_x11.XDefaultRootWindow.restype = ctypes.c_ulong
+_x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+_x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+_x11.XFetchName.restype = ctypes.c_int
+_x11.XFetchName.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
+_x11.XFree.argtypes = [ctypes.c_void_p]
+_x11.XQueryTree.restype = ctypes.c_int
+_x11.XKeysymToKeycode.restype = ctypes.c_uint
+_x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+_xtst.XTestFakeKeyEvent.restype = ctypes.c_int
+_xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
 
-    # Focus MT5 and open Tools → Options via keyboard (Alt+T then O)
-    DISPLAY=:1 xdotool windowfocus --sync "${_win}" 2>/dev/null || true
-    sleep 1
-    DISPLAY=:1 xdotool key --window "${_win}" alt+t 2>/dev/null || true
-    sleep 0.6
-    DISPLAY=:1 xdotool key --window "${_win}" o 2>/dev/null || true
-    sleep 1.2
-    show_message "[ea-options] Options dialog opened."
+dpy = _x11.XOpenDisplay(b':1')
+if not dpy:
+    print('[ea-options] Cannot open display :1')
+    sys.exit(0)
 
-    # Navigate to Expert Advisors tab using Ctrl+Tab (3 presses from Charts tab)
-    for _i in 1 2 3; do
-        DISPLAY=:1 xdotool key ctrl+Tab 2>/dev/null || true
-        sleep 0.3
-    done
-    sleep 0.5
-    show_message "[ea-options] Expert Advisors tab selected."
+# ── Find MT5 window ──────────────────────────────────────────────
+def _all_windows(dpy, root):
+    wins = []
+    nch = ctypes.c_uint(0)
+    rr = ctypes.c_ulong(0); pr = ctypes.c_ulong(0)
+    ch = ctypes.POINTER(ctypes.c_ulong)()
+    if _x11.XQueryTree(dpy, root, ctypes.byref(rr), ctypes.byref(pr),
+                       ctypes.byref(ch), ctypes.byref(nch)) and nch.value:
+        for i in range(nch.value):
+            wins.append(ch[i])
+            wins.extend(_all_windows(dpy, ch[i]))
+        _x11.XFree(ch)
+    return wins
 
-    # ── Tab 1-3: skip past the first 3 checkboxes ─────────────────
-    for _i in 1 2 3; do
-        DISPLAY=:1 xdotool key Tab 2>/dev/null || true
-        sleep 0.15
-    done
+root = _x11.XDefaultRootWindow(dpy)
+mt5_win = None
+for attempt in range(20):  # wait up to 60s
+    for wid in _all_windows(dpy, root):
+        np = ctypes.c_char_p()
+        if _x11.XFetchName(dpy, wid, ctypes.byref(np)) and np.value:
+            name = np.value.decode('utf-8', errors='replace')
+            _x11.XFree(np)
+            if any(k in name.lower() for k in ['metatrader','icmarkets','hfm','mt5']):
+                mt5_win = wid
+                print(f'[ea-options] MT5 window found: {wid} "{name}"')
+                break
+    if mt5_win:
+        break
+    time.sleep(3)
 
-    # ── Tab 4: Allow DLL imports — force ON ───────────────────────
-    # MT5 resets this to off; we press Space twice (off→on if it was off,
-    # or on→off→on if it was already on) — net result: always ON.
-    DISPLAY=:1 xdotool key space 2>/dev/null || true
-    sleep 0.2
-    DISPLAY=:1 xdotool key space 2>/dev/null || true
-    sleep 0.2
-    show_message "[ea-options] Allow DLL imports: ON"
+if not mt5_win:
+    print('[ea-options] MT5 window not found — skipping GUI automation.')
+    _x11.XCloseDisplay(dpy)
+    sys.exit(0)
 
-    # ── Tab 5: Allow imports of external experts — skip ───────────
-    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
-    sleep 0.15
+# ── Key helpers ──────────────────────────────────────────────────
+XK_Tab      = 0xFF09
+XK_Return   = 0xFF0D
+XK_space    = 0x0020
+XK_Alt_L    = 0xFFE9
+XK_Shift_L  = 0xFFE1
+XK_Control_L= 0xFFE3
 
-    # ── Tab 6: Allow WebRequest for listed URL — force ON ─────────
-    DISPLAY=:1 xdotool key space 2>/dev/null || true
-    sleep 0.2
-    DISPLAY=:1 xdotool key space 2>/dev/null || true
-    sleep 0.2
-    show_message "[ea-options] Allow WebRequest for listed URL: ON"
+def _kc(ks):
+    return _x11.XKeysymToKeycode(dpy, ks)
 
-    # ── Tab 7: URL listbox — move to it ───────────────────────────
-    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
-    sleep 0.2
+def _press(ks):
+    _xtst.XTestFakeKeyEvent(dpy, _kc(ks), 1, 0)
+    _x11.XSync(dpy, 0)
 
-    # ── Tab 8: Add button — press it to open URL input dialog ─────
-    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
-    sleep 0.2
-    DISPLAY=:1 xdotool key Return 2>/dev/null || true
-    sleep 0.8
-    show_message "[ea-options] Add URL dialog opened."
+def _release(ks):
+    _xtst.XTestFakeKeyEvent(dpy, _kc(ks), 0, 0)
+    _x11.XSync(dpy, 0)
 
-    # Type the URL and confirm
-    DISPLAY=:1 xdotool type --clearmodifiers "http://127.0.0.1" 2>/dev/null || true
-    sleep 0.3
-    DISPLAY=:1 xdotool key Return 2>/dev/null || true
-    sleep 0.5
-    show_message "[ea-options] http://127.0.0.1 added."
+def key(ks, delay=0.2):
+    _press(ks); time.sleep(0.05); _release(ks); time.sleep(delay)
 
-    # Close Options with OK (press Enter — default button)
-    DISPLAY=:1 xdotool key Return 2>/dev/null || true
-    sleep 0.8
-    show_message "[ea-options] Options saved — DLL imports + WebRequest whitelist set."
+def combo(mod, ks, delay=0.3):
+    _press(mod); time.sleep(0.05)
+    _press(ks);  time.sleep(0.05)
+    _release(ks); time.sleep(0.05)
+    _release(mod); time.sleep(delay)
+
+# Type a fixed ASCII string — handles shift for ':' (Shift+;)
+_SHIFT_CHARS = {':': 0x003B, '!': 0x0031, '@': 0x0032}
+def type_str(s):
+    for ch in s:
+        if ch in _SHIFT_CHARS:
+            combo(XK_Shift_L, _SHIFT_CHARS[ch], 0.05)
+        else:
+            key(ord(ch), 0.05)
+
+# ── Focus MT5 and open Tools → Options (Alt+T, O) ───────────────
+_x11.XSetInputFocus(dpy, mt5_win, 2, 0)  # RevertToParent=2
+_x11.XSync(dpy, 0)
+time.sleep(1.0)
+combo(XK_Alt_L, ord('t'), 0.6)
+key(ord('o'), 1.2)
+print('[ea-options] Options dialog opened.')
+
+# ── Navigate to Expert Advisors tab (Ctrl+Tab × 3) ──────────────
+for _ in range(3):
+    combo(XK_Control_L, XK_Tab, 0.3)
+time.sleep(0.5)
+print('[ea-options] Expert Advisors tab selected.')
+
+# ── Skip 3 checkboxes before Allow DLL imports ───────────────────
+for _ in range(3):
+    key(XK_Tab, 0.15)
+
+# ── Allow DLL imports: Space×2 → always ON ───────────────────────
+key(XK_space, 0.2); key(XK_space, 0.2)
+print('[ea-options] Allow DLL imports: ON')
+
+# ── Skip "Allow imports of external experts" ─────────────────────
+key(XK_Tab, 0.15)
+
+# ── Allow WebRequest for listed URL: Space×2 → always ON ─────────
+key(XK_space, 0.2); key(XK_space, 0.2)
+print('[ea-options] Allow WebRequest for listed URL: ON')
+
+# ── Tab to URL listbox, then Tab to Add button, press Enter ───────
+key(XK_Tab, 0.2)
+key(XK_Tab, 0.2)
+key(XK_Return, 0.8)
+print('[ea-options] Add URL dialog opened.')
+
+# ── Type http://127.0.0.1 ────────────────────────────────────────
+type_str('http://127.0.0.1')
+key(XK_Return, 0.5)
+print('[ea-options] http://127.0.0.1 added.')
+
+# ── Confirm with OK (Enter) ──────────────────────────────────────
+key(XK_Return, 0.8)
+print('[ea-options] Options saved — DLL imports + WebRequest whitelist set.')
+
+_x11.XCloseDisplay(dpy)
+_PY_EA_OPTIONS
 }
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
@@ -1117,76 +1152,46 @@ _journal_state=$(echo "${_journal_out}" | grep '^STATE:' | cut -d: -f2)
 [ -z "${_journal_state}" ] && _journal_state="UNKNOWN"
 show_message "AutoTrading state from journal: ${_journal_state}"
 
-# ── Find the MT5 X11 window ────────────────────────────────────────
-# KasmVNC's Xvnc server requires the correct XAUTHORITY cookie — without it
-# xdotool silently returns no results. Discover and export the cookie file.
-_xauth_file=""
-for _xauth_candidate in \
-        /tmp/.Xauthority \
-        "${HOME}/.Xauthority" \
-        /home/abc/.Xauthority \
-        /root/.Xauthority \
-        /config/.Xauthority; do
-    if [ -f "${_xauth_candidate}" ]; then
-        _xauth_file="${_xauth_candidate}"
-        break
-    fi
-done
-# Also search /tmp for any .Xauthority-style file (KasmVNC may use a random path)
-if [ -z "${_xauth_file}" ]; then
-    _xauth_file=$(ls /tmp/.Xauth* /tmp/.xauth* 2>/dev/null | head -1 || true)
-fi
-if [ -n "${_xauth_file}" ]; then
-    export XAUTHORITY="${_xauth_file}"
-    show_message "Using XAUTHORITY=${_xauth_file} for xdotool."
+# ── Send Ctrl+E to enable AutoTrading via Python3/ctypes ──────────
+_mt5_win=$(DISPLAY=:1 python3 - 2>/dev/null <<'_PY_FIND_WIN'
+import ctypes, sys, time
+try:
+    _x11 = ctypes.CDLL('libX11.so.6')
+    _x11.XOpenDisplay.restype = ctypes.c_void_p
+    _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    _x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    _x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    _x11.XQueryTree.restype = ctypes.c_int
+    _x11.XFetchName.restype = ctypes.c_int
+    _x11.XFetchName.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
+    _x11.XFree.argtypes = [ctypes.c_void_p]
+    dpy = _x11.XOpenDisplay(b':1')
+    if not dpy: sys.exit(1)
+    def _wins(dpy, r):
+        ws=[]; nc=ctypes.c_uint(0); rr=ctypes.c_ulong(0); pr=ctypes.c_ulong(0)
+        ch=ctypes.POINTER(ctypes.c_ulong)()
+        if _x11.XQueryTree(dpy,r,ctypes.byref(rr),ctypes.byref(pr),ctypes.byref(ch),ctypes.byref(nc)) and nc.value:
+            for i in range(nc.value): ws.append(ch[i]); ws.extend(_wins(dpy,ch[i]))
+            _x11.XFree(ch)
+        return ws
+    root = _x11.XDefaultRootWindow(dpy)
+    for wid in _wins(dpy, root):
+        np=ctypes.c_char_p()
+        if _x11.XFetchName(dpy,wid,ctypes.byref(np)) and np.value:
+            n=np.value.decode('utf-8',errors='replace'); _x11.XFree(np)
+            if any(k in n.lower() for k in ['metatrader','icmarkets','hfm','mt5']):
+                print(wid); sys.exit(0)
+except: pass
+_PY_FIND_WIN
+)
+
+if [ -n "${_mt5_win}" ]; then
+    show_message "MT5 window found for AutoTrading toggle: id=${_mt5_win}"
 else
-    show_message "WARNING: no XAUTHORITY file found — xdotool may fail on KasmVNC."
-fi
-
-# Wait up to 30s for the window to appear, try multiple patterns.
-_mt5_win=""
-show_message "Searching for MT5 X11 window (up to 30s)..."
-_win_elapsed=0
-while [ -z "${_mt5_win}" ] && [ ${_win_elapsed} -lt 30 ]; do
-    # Try broad regex — matches "MetaTrader 5", "MetaTrader5", MT5 variants
-    _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null \
-        | head -1 || true)
-    # Also try matching any visible window whose title contains known patterns
-    if [ -z "${_mt5_win}" ]; then
-        _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
-            | while read -r _wid; do
-                _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
-                case "${_wn}" in
-                    *[Mm]eta*|*[Tt]rader*|*terminal64*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
-                esac
-              done | head -1 || true)
-    fi
-    if [ -n "${_mt5_win}" ]; then
-        _wt=$(DISPLAY=:1 xdotool getwindowname "${_mt5_win}" 2>/dev/null || true)
-        show_message "MT5 window found: id=${_mt5_win} title='${_wt}'"
-        break
-    fi
-    sleep 3
-    _win_elapsed=$((_win_elapsed + 3))
-done
-
-if [ -z "${_mt5_win}" ]; then
-    # Diagnostic: list every visible window (errors shown — no 2>/dev/null) so we
-    # can see if xdotool itself is failing or simply finds no matching windows.
-    show_message "WARNING: MT5 window not found after ${_win_elapsed}s. All visible X11 windows:"
-    DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>&1 | head -30 | \
-        while read -r _wid; do
-            _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
-            _wc=$(DISPLAY=:1 xdotool getwindowclassname "${_wid}" 2>/dev/null || true)
-            show_message "  wid=${_wid} class=${_wc} name='${_wn}'"
-        done || true
-    show_message "AutoTrading must be enabled manually: VNC http://localhost:3001 → AutoTrading toolbar button."
+    show_message "MT5 window not found — AutoTrading must be enabled manually via VNC."
 fi
 
 # ── Send Ctrl+E to enable AutoTrading, up to 4 attempts ──────────
-# Only send if: window found AND (journal says OFF, or journal is UNKNOWN).
-# If journal says ON we still send once to be safe (see user requirement),
-# then verify with a second journal read.
 if [ -n "${_mt5_win}" ]; then
     _at_max=4
     _at_attempts=0
@@ -1194,8 +1199,22 @@ if [ -n "${_mt5_win}" ]; then
     while [ ${_at_attempts} -lt ${_at_max} ]; do
         _at_attempts=$((_at_attempts + 1))
         show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max} (journal=${_journal_state})..."
-        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null || \
-            DISPLAY=:1 xdotool key ctrl+e 2>/dev/null || true
+        DISPLAY=:1 python3 -c "
+import ctypes, time
+x11=ctypes.CDLL('libX11.so.6'); xtst=ctypes.CDLL('libXtst.so.6')
+x11.XOpenDisplay.restype=ctypes.c_void_p; x11.XOpenDisplay.argtypes=[ctypes.c_char_p]
+x11.XKeysymToKeycode.restype=ctypes.c_uint; x11.XKeysymToKeycode.argtypes=[ctypes.c_void_p,ctypes.c_ulong]
+xtst.XTestFakeKeyEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
+x11.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int]
+x11.XSetInputFocus.argtypes=[ctypes.c_void_p,ctypes.c_ulong,ctypes.c_int,ctypes.c_ulong]
+dpy=x11.XOpenDisplay(b':1')
+x11.XSetInputFocus(dpy,${_mt5_win},2,0); x11.XSync(dpy,0); time.sleep(0.3)
+ctrl=x11.XKeysymToKeycode(dpy,0xFFE3); e_key=x11.XKeysymToKeycode(dpy,ord('e'))
+xtst.XTestFakeKeyEvent(dpy,ctrl,1,0); x11.XSync(dpy,0); time.sleep(0.05)
+xtst.XTestFakeKeyEvent(dpy,e_key,1,0); x11.XSync(dpy,0); time.sleep(0.05)
+xtst.XTestFakeKeyEvent(dpy,e_key,0,0); x11.XSync(dpy,0); time.sleep(0.05)
+xtst.XTestFakeKeyEvent(dpy,ctrl,0,0); x11.XSync(dpy,0)
+" 2>/dev/null || true
         sleep 3
         # Re-read journal to see if the toggle was logged
         _new_out=$(_read_autotrading_from_journal)
