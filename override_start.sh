@@ -1013,8 +1013,8 @@ for _ in range(3):
 time.sleep(0.5)
 print('[ea-options] Expert Advisors tab selected.')
 
-# ── Skip 3 checkboxes before Allow DLL imports ───────────────────
-for _ in range(3):
+# ── Skip 5 checkboxes before Allow DLL imports ───────────────────
+for _ in range(5):
     key(XK_Tab, 0.15)
 
 # ── Allow DLL imports: Space×2 → always ON ───────────────────────
