@@ -149,36 +149,26 @@ fi
     _hash() { md5sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"; }
     while true; do
         sleep 10
-        # terminal.ini guard
-        if [ -f "${_t_bak}" ]; then
-            _bak_hash=$(_hash "${_t_bak}")
-            if [ -f "${_t_live}" ]; then
-                if [ "$(_hash "${_t_live}")" != "${_bak_hash}" ]; then
-                    cp "${_t_bak}" "${_t_live}"
-                    chown abc:abc "${_t_live}" 2>/dev/null || true
-                    show_message "[whitelist-watcher] terminal.ini content changed — restored backup."
-                fi
-            else
-                mkdir -p "${_watcher_config_dir}"
-                cp "${_t_bak}" "${_t_live}"
-                chown abc:abc "${_t_live}" 2>/dev/null || true
-                show_message "[whitelist-watcher] terminal.ini missing — restored from backup."
+        # terminal.ini guard — when content changes, save live file as new backup
+        if [ -f "${_t_live}" ]; then
+            _live_hash=$(_hash "${_t_live}")
+            _bak_hash=$(_hash "${_t_bak}" 2>/dev/null || echo "none")
+            if [ "${_live_hash}" != "${_bak_hash}" ]; then
+                cp "${_t_live}" "${_t_bak}"
+                chown abc:abc "${_t_bak}" 2>/dev/null || true
+                chmod 644 "${_t_bak}" 2>/dev/null || true
+                show_message "[whitelist-watcher] terminal.ini changed — saved as new backup."
             fi
         fi
-        # experts.ini guard (older build fallback)
-        if [ -f "${_e_bak}" ]; then
-            _bak_hash=$(_hash "${_e_bak}")
-            if [ -f "${_e_live}" ]; then
-                if [ "$(_hash "${_e_live}")" != "${_bak_hash}" ]; then
-                    cp "${_e_bak}" "${_e_live}"
-                    chown abc:abc "${_e_live}" 2>/dev/null || true
-                    show_message "[whitelist-watcher] experts.ini content changed — restored backup."
-                fi
-            else
-                mkdir -p "${_watcher_config_dir}"
-                cp "${_e_bak}" "${_e_live}"
-                chown abc:abc "${_e_live}" 2>/dev/null || true
-                show_message "[whitelist-watcher] experts.ini missing — restored from backup."
+        # experts.ini guard (older build fallback) — same: live becomes new backup
+        if [ -f "${_e_live}" ]; then
+            _live_hash=$(_hash "${_e_live}")
+            _bak_hash=$(_hash "${_e_bak}" 2>/dev/null || echo "none")
+            if [ "${_live_hash}" != "${_bak_hash}" ]; then
+                cp "${_e_live}" "${_e_bak}"
+                chown abc:abc "${_e_bak}" 2>/dev/null || true
+                chmod 644 "${_e_bak}" 2>/dev/null || true
+                show_message "[whitelist-watcher] experts.ini changed — saved as new backup."
             fi
         fi
     done
