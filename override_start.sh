@@ -1017,15 +1017,15 @@ print('[ea-options] Expert Advisors tab selected.')
 for _ in range(5):
     key(XK_Tab, 0.15)
 
-# ── Allow DLL imports: Space×2 → always ON ───────────────────────
-key(XK_space, 0.2); key(XK_space, 0.2)
+# ── Allow DLL imports: single Space → OFF→ON ─────────────────────
+key(XK_space, 0.2)
 print('[ea-options] Allow DLL imports: ON')
 
 # ── Skip "Allow imports of external experts" ─────────────────────
 key(XK_Tab, 0.15)
 
-# ── Allow WebRequest for listed URL: Space×2 → always ON ─────────
-key(XK_space, 0.2); key(XK_space, 0.2)
+# ── Allow WebRequest for listed URL: single Space → OFF→ON ───────
+key(XK_space, 0.2)
 print('[ea-options] Allow WebRequest for listed URL: ON')
 
 # ── Tab to URL listbox, then Tab to Add button, press Enter ───────
