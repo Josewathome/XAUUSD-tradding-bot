@@ -162,11 +162,7 @@ KES_PER_USD: float = 130.0
 
 SYMBOL_CURRENCIES: dict[str, list[str]] = {
     "EURUSD": ["EUR", "USD"],
-    "GBPUSD": ["GBP", "USD"],
     "XAUUSD": ["USD"],
-    "USDJPY": ["USD", "JPY"],
-    "AUDUSD": ["AUD", "USD"],
-    "USDCHF": ["USD", "CHF"],
 }
 
 # ── Trade Monitor ─────────────────────────────────────────────────
