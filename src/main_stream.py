@@ -284,7 +284,7 @@ def run_stream() -> None:
     strategy: IStrategyEngine = build_engine(config.SYMBOLS)
     logger.info("Seeding strategy engine with historical candles...")
     _strategy_seed_counts = {
-        Timeframe.M5:  30,
+        Timeframe.M5:  55,   # EMA_SLOW=50 requires ≥50 bars; 55 gives a small buffer
         Timeframe.M1:  120,
     }
     for sym in config.SYMBOLS:
@@ -546,7 +546,17 @@ def run_stream() -> None:
                     logger.exception("Post-trade monitoring [%s]: %s", sym, exc)
 
         elif etype == "HEARTBEAT":
-            logger.debug("Heartbeat: broker_time=%s", event.get("time"))
+            _hb_ts = event.get("time", 0)
+            try:
+                from datetime import datetime, timezone as _tz
+                _hb_utc = datetime.fromtimestamp(_hb_ts, tz=_tz.utc)
+                logger.info(
+                    "Heartbeat | broker_utc=%s | local_utc=%s",
+                    _hb_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                    datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                )
+            except Exception:
+                logger.debug("Heartbeat: broker_time=%s", _hb_ts)
 
         # ── Periodic checkpoint ─────────────────────────────────────────
         if (now - last_checkpoint).total_seconds() >= cp_interval:

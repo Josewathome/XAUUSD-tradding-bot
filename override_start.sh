@@ -74,18 +74,41 @@ EXPERTS_INI_BACKUP="/config/experts_ini.bak"
 TERMINAL_INI_BACKUP="/config/terminal_ini.bak"
 
 # Restore from per-file backups first (most reliable, explicitly saved).
+# Fix ownership in case files were placed by root (e.g. docker cp).
 _restored=0
 if [ -f "${TERMINAL_INI_BACKUP}" ]; then
+    chown abc:abc "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
+    chmod 644 "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-    cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}"
-    show_message "[0/6] terminal.ini restored from backup (whitelist preserved)."
-    _restored=1
+    if cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}" 2>/dev/null; then
+        chown abc:abc "${TERMINAL_INI_LIVE}" 2>/dev/null || true
+        chmod 644 "${TERMINAL_INI_LIVE}" 2>/dev/null || true
+        show_message "[0/6] terminal.ini restored from backup (whitelist preserved)."
+        _restored=1
+    else
+        show_message "[0/6] ERROR: could not restore terminal.ini — fixing ownership and retrying."
+        chown abc:abc "${TERMINAL_INI_LIVE}" 2>/dev/null || true
+        chmod 644 "${TERMINAL_INI_LIVE}" 2>/dev/null || true
+        if cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}" 2>/dev/null; then
+            show_message "[0/6] terminal.ini restored after ownership fix."
+            _restored=1
+        else
+            show_message "[0/6] FATAL: terminal.ini restore failed — whitelist will be missing."
+        fi
+    fi
 fi
 if [ -f "${EXPERTS_INI_BACKUP}" ]; then
+    chown abc:abc "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
+    chmod 644 "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-    show_message "[0/6] experts.ini restored from backup (whitelist preserved)."
-    _restored=1
+    if cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}" 2>/dev/null; then
+        chown abc:abc "${EXPERTS_INI_LIVE}" 2>/dev/null || true
+        chmod 644 "${EXPERTS_INI_LIVE}" 2>/dev/null || true
+        show_message "[0/6] experts.ini restored from backup (whitelist preserved)."
+        _restored=1
+    else
+        show_message "[0/6] ERROR: experts.ini restore failed."
+    fi
 fi
 # Fall back to full Config/ directory backup.
 if [ "${_restored}" -eq 0 ] && [ -d /config/mt5_config_backup ]; then
