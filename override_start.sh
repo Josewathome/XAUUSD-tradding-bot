@@ -59,122 +59,46 @@ else
 fi
 
 # ── [0/6] Restore WebRequest whitelist (127.0.0.1 socket access) ──
-# MT5 stores the "Allow WebRequest for listed URL" setting in an encrypted
-# binary file keyed to MachineGuid. The exact filename varies by MT5 build:
-#   - older builds: Config/experts.ini
-#   - newer builds (5.0.37+): Config/terminal.ini  ← this container
-# Without 127.0.0.1 in the list, SocketConnect returns err=4014.
-# Since MachineGuid is pinned, the encrypted blob stays valid across restarts.
-# Strategy: back up the FULL Config/ directory once (first run after operator
-# sets the URL), then restore it on every subsequent start before MT5 launches.
+# MT5 stores the "Allow WebRequest for listed URL" entries in an encrypted
+# binary Config/experts.ini keyed to the MachineGuid. Without 127.0.0.1 in
+# the list, SocketConnect returns err=4014 and the EA never connects.
+# Since MachineGuid is pinned (constant across restarts), the encrypted blob
+# remains valid — so we back it up once (after the operator adds 127.0.0.1
+# via VNC) and restore it on every subsequent start BEFORE MT5 launches.
 _MT5_CONFIG_DIR_EARLY="/config/.wine/drive_c/Program Files/MetaTrader 5/Config"
 EXPERTS_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/experts.ini"
 TERMINAL_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/terminal.ini"
 EXPERTS_INI_BACKUP="/config/experts_ini.bak"
 TERMINAL_INI_BACKUP="/config/terminal_ini.bak"
 
-# Save the current live terminal.ini as the new backup on every startup.
-# This means whatever is set in MT5 right now becomes the source of truth —
-# no old backup is ever restored at startup.
-# _restored=0
-# if [ -f "${TERMINAL_INI_BACKUP}" ]; then
-#     chown abc:abc "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-#     chmod 644 "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-#     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-#     if cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}" 2>/dev/null; then
-#         chown abc:abc "${TERMINAL_INI_LIVE}" 2>/dev/null || true
-#         chmod 644 "${TERMINAL_INI_LIVE}" 2>/dev/null || true
-#         show_message "[0/6] terminal.ini restored from backup (whitelist preserved)."
-#         _restored=1
-#     else
-#         show_message "[0/6] ERROR: could not restore terminal.ini — fixing ownership and retrying."
-#         chown abc:abc "${TERMINAL_INI_LIVE}" 2>/dev/null || true
-#         chmod 644 "${TERMINAL_INI_LIVE}" 2>/dev/null || true
-#         if cp "${TERMINAL_INI_BACKUP}" "${TERMINAL_INI_LIVE}" 2>/dev/null; then
-#             show_message "[0/6] terminal.ini restored after ownership fix."
-#             _restored=1
-#         else
-#             show_message "[0/6] FATAL: terminal.ini restore failed — whitelist will be missing."
-#         fi
-#     fi
-# fi
-# if [ -f "${EXPERTS_INI_BACKUP}" ]; then
-#     chown abc:abc "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
-#     chmod 644 "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
-#     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-#     if cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}" 2>/dev/null; then
-#         chown abc:abc "${EXPERTS_INI_LIVE}" 2>/dev/null || true
-#         chmod 644 "${EXPERTS_INI_LIVE}" 2>/dev/null || true
-#         show_message "[0/6] experts.ini restored from backup (whitelist preserved)."
-#         _restored=1
-#     else
-#         show_message "[0/6] ERROR: experts.ini restore failed."
-#     fi
-# fi
-# # Fall back to full Config/ directory backup.
-# if [ "${_restored}" -eq 0 ] && [ -d /config/mt5_config_backup ]; then
-#     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-#     cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
-#     show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
-#     _restored=1
-# fi
-if [ -f "${TERMINAL_INI_LIVE}" ]; then
-    cp "${TERMINAL_INI_LIVE}" "${TERMINAL_INI_BACKUP}"
-    chown abc:abc "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-    chmod 644 "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-    show_message "[0/6] terminal.ini saved as new backup (current live file is now the source of truth)."
-elif [ -f "${TERMINAL_INI_BACKUP}" ]; then
-    show_message "[0/6] terminal.ini not found yet — existing backup kept."
+# Restore the full Config/ backup BEFORE MT5 starts — this is what puts the
+# encrypted whitelist blob back in place after a power cut or docker restart.
+# Use force-copy (not -n) so stale/reset files are replaced with the good backup.
+if [ -d /config/mt5_config_backup ]; then
+    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+    cp -r /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
+    chown -R abc:abc "${_MT5_CONFIG_DIR_EARLY}" 2>/dev/null || true
+    show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
 else
-    show_message "[0/6] No terminal.ini found — backup will be created after MT5 first run."
+    show_message "[0/6] No mt5_config_backup yet — will save after ready_to_trade."
 fi
-if [ -f "${EXPERTS_INI_LIVE}" ]; then
-    cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-    chown abc:abc "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
-    chmod 644 "${EXPERTS_INI_BACKUP}" 2>/dev/null || true
-    show_message "[0/6] experts.ini saved as new backup."
+# Individual-file fallbacks (older builds or partial backup scenarios).
+if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+    mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
+    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+    show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
+elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
+    _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+    _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+    if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
+        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+        show_message "[0/6] experts.ini restored from backup (live file was smaller/reset)."
+    else
+        show_message "[0/6] experts.ini live file OK."
+    fi
+else
+    show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
 fi
-
-# ── [0/6] Whitelist watcher — protects terminal.ini and experts.ini ──
-# MT5 overwrites these files on every launch, erasing the WebRequest whitelist.
-# Uses content hash (md5sum) rather than mtime so legitimate in-process writes
-# (e.g. _patch_terminal_ini) do NOT trigger a spurious restore — only a real
-# content change causes a restore.
-(
-    _watcher_config_dir="${_MT5_CONFIG_DIR_EARLY}"
-    _t_bak="${TERMINAL_INI_BACKUP}"
-    _t_live="${TERMINAL_INI_LIVE}"
-    _e_bak="${EXPERTS_INI_BACKUP}"
-    _e_live="${EXPERTS_INI_LIVE}"
-    _hash() { md5sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"; }
-    while true; do
-        sleep 10
-        # terminal.ini guard — when content changes, save live file as new backup
-        if [ -f "${_t_live}" ]; then
-            _live_hash=$(_hash "${_t_live}")
-            _bak_hash=$(_hash "${_t_bak}" 2>/dev/null || echo "none")
-            if [ "${_live_hash}" != "${_bak_hash}" ]; then
-                cp "${_t_live}" "${_t_bak}"
-                chown abc:abc "${_t_bak}" 2>/dev/null || true
-                chmod 644 "${_t_bak}" 2>/dev/null || true
-                show_message "[whitelist-watcher] terminal.ini changed — saved as new backup."
-            fi
-        fi
-        # experts.ini guard (older build fallback) — same: live becomes new backup
-        if [ -f "${_e_live}" ]; then
-            _live_hash=$(_hash "${_e_live}")
-            _bak_hash=$(_hash "${_e_bak}" 2>/dev/null || echo "none")
-            if [ "${_live_hash}" != "${_bak_hash}" ]; then
-                cp "${_e_live}" "${_e_bak}"
-                chown abc:abc "${_e_bak}" 2>/dev/null || true
-                chmod 644 "${_e_bak}" 2>/dev/null || true
-                show_message "[whitelist-watcher] experts.ini changed — saved as new backup."
-            fi
-        fi
-    done
-) &
-_experts_watcher_pid=$!
-show_message "[0/6] Whitelist watcher started (pid ${_experts_watcher_pid}) — guards terminal.ini + experts.ini against MT5 reset."
 
 # EA auto-start on this build is handled by the [StartUp] /config: mechanism
 # (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
@@ -617,25 +541,6 @@ print('1')
         echo "${_val}" > /tmp/_mt5_autotrading_before
     }
     _capture_ea_state
-    # Restore experts.ini (WebRequest whitelist) from backup before EVERY launch.
-    # MT5 resets this file on a hard kill — restoring it here ensures 127.0.0.1
-    # is always whitelisted so SocketConnect succeeds (no err=4014).
-    if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
-        mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
-        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-        show_message "[launch] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
-    elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
-        _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-        _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
-        if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
-            cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-            show_message "[launch] experts.ini reset detected — restored from backup."
-        fi
-    fi
-    # Also restore full Config/ backup for any other whitelist-bearing files.
-    if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
-        cp -rn /config/mt5_config_backup/. "${MT5_CONFIG_DIR}/" 2>/dev/null || true
-    fi
     _write_startup_ini
     _patch_terminal_ini
     _empty_default_profile
@@ -717,19 +622,13 @@ if [ ! -f /config/ready_to_trade ]; then
     echo ""
     echo "  1. Open http://localhost:3001 — confirm MT5 is logged in"
     echo "     and charts are loaded"
-    echo "  2. Tools → Options → Expert Advisors:"
-    echo "     a) Tick: Allow algorithmic trading"
-    echo "     b) Tick: Allow WebRequest for listed URL"
-    echo "        Add: http://127.0.0.1"
-    echo "     c) Click OK"
-    echo "  3. Save the whitelist so it survives restarts:"
-    echo "     docker exec xauusd-bot cp \\"
-    echo "       \"/config/.wine/drive_c/Program Files/MetaTrader 5/Config/experts.ini\" \\"
-    echo "       /config/experts_ini.bak"
-    echo "  4. Run this command to start the bot:"
+    echo "  2. Tools → Options → Expert Advisors"
+    echo "     → Allow Algorithmic Trading"
+    echo "     → Allow WebRequest for listed URL → Add: http://127.0.0.1"
+    echo "     → Click OK"
+    echo "  3. Run this command to start the bot:"
     echo "     docker exec xauusd-bot touch /config/ready_to_trade"
-    echo ""
-    echo "  IMPORTANT: complete steps 2 and 3 BEFORE running step 4."
+    echo "     (The script will automatically back up the Config/ settings.)"
     echo "  Waiting for ready_to_trade signal..."
     while [ ! -f /config/ready_to_trade ]; do
         sleep 5
@@ -739,49 +638,25 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Save whitelist backups — ONLY on first run (no backups exist yet).
-# NEVER overwrite existing backups: they are the ground truth. MT5 resets
-# terminal.ini and experts.ini on every startup; overwriting the backup with
-# the post-reset live file permanently breaks SocketConnect (err=4014).
-# To force a re-capture (e.g. after changing the URL list), delete
-# /config/terminal_ini.bak (and /config/experts_ini.bak) then restart.
-_need_first_backup=0
-if [ ! -f "${TERMINAL_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_BACKUP}" ]; then
-    if [ ! -f "/config/mt5_config_backup/terminal.ini" ] && \
-       [ ! -f "/config/mt5_config_backup/experts.ini" ]; then
-        _need_first_backup=1
-    fi
-fi
-
-if [ "${_need_first_backup}" -eq 1 ]; then
-    # First run: wait briefly for MT5 to settle after the operator sets the URL.
-    sleep 10
-    # Back up whichever files exist now — terminal.ini on this build.
-    _backed=0
-    if [ -f "${TERMINAL_INI_LIVE}" ]; then
-        cp "${TERMINAL_INI_LIVE}" "${TERMINAL_INI_BACKUP}"
-        show_message "terminal.ini backed up — whitelist will auto-restore on future starts."
-        _backed=1
-    fi
-    if [ -f "${EXPERTS_INI_LIVE}" ]; then
-        cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-        show_message "experts.ini backed up — whitelist will auto-restore on future starts."
-        _backed=1
-    fi
-    # Always save a full Config/ snapshot as belt-and-suspenders fallback.
-    if [ -d "${MT5_CONFIG_DIR}" ]; then
-        rm -rf /config/mt5_config_backup
-        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-        if [ "${_backed}" -eq 1 ]; then
-            show_message "Full Config/ also backed up as fallback."
-        else
-            show_message "WARNING: neither terminal.ini nor experts.ini found."
-            show_message "  Add http://127.0.0.1 in Options → Expert Advisors → Allow WebRequest,"
-            show_message "  then delete /config/terminal_ini.bak and restart to re-capture."
-        fi
-    fi
+# Back up the full Config/ directory now that the operator has confirmed setup.
+# The "Allow WebRequest for listed URL" entries (which authorize SocketConnect
+# to 127.0.0.1, fixing err=4014) are stored encrypted in MT5's Config dir,
+# keyed to the MachineGuid. MachineGuid is pinned, so the blob stays valid.
+# We always replace the backup here so it captures the current live settings
+# (including any whitelist changes made via VNC since the last restart).
+if [ -f "${EXPERTS_INI_LIVE}" ]; then
+    cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+    show_message "experts.ini backed up (whitelist will auto-restore on future starts)."
 else
-    show_message "Whitelist backups already present — skipping re-capture (whitelist preserved)."
+    show_message "NOTE: experts.ini not present on this build. Config/ contents:"
+    ls -la "${MT5_CONFIG_DIR}" 2>/dev/null | sed 's/^/    /' || true
+fi
+# Always save a full Config/ snapshot — captures whichever file carries the
+# encrypted whitelist on this MT5 build (terminal.ini, experts.ini, or other).
+if [ -d "${MT5_CONFIG_DIR}" ]; then
+    rm -rf /config/mt5_config_backup
+    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+    show_message "Full Config/ backed up to /config/mt5_config_backup (whitelist preserved)."
 fi
 
 # ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
