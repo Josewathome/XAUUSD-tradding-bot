@@ -77,7 +77,7 @@ ZMQ_ENDPOINT = getattr(config, "ZMQ_ENDPOINT", "tcp://127.0.0.1:5556")
 # Seed only M1 and M5 — M5 retained for any strategy that needs higher-TF context.
 _SEED_COUNTS: Dict[Timeframe, int] = {
     Timeframe.M1: 120,
-    Timeframe.M5: 30,
+    Timeframe.M5: 55,   # EMA_SLOW=50 requires ≥50 bars
 }
 
 
@@ -594,7 +594,7 @@ def _run_strategy_evaluation(
         return
 
     m1_candles = builder.get_closed_candles(TF.M1, 60)
-    m5_candles = builder.get_closed_candles(TF.M5, 30)
+    m5_candles = builder.get_closed_candles(TF.M5, 55)
     forming_m1 = builder.get_forming_bar(TF.M1)
 
     if not m1_candles or not m5_candles:
