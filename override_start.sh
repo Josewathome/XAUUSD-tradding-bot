@@ -1088,161 +1088,31 @@ fi
 # Open the Options dialog via xdotool and add http://127.0.0.1 directly
 # so MT5 writes the whitelist itself (the only change that sticks).
 show_message "Setting MT5 EA options via GUI automation (DLL imports + WebRequest whitelist)..."
+_settings_pre_mod=$(stat -c%Y "${MT5_CONFIG_DIR}/settings.ini" 2>/dev/null || echo 0)
 _set_mt5_ea_options
-# After MT5 writes the updated settings, back up the new settings.ini
-# so subsequent restarts start with the correct whitelist already in place.
-sleep 2
+# Wait for MT5 to actually write settings.ini (up to 20s, check every second)
+_waited=0
+while [ $_waited -lt 20 ]; do
+    sleep 1
+    _cur_mod=$(stat -c%Y "${MT5_CONFIG_DIR}/settings.ini" 2>/dev/null || echo 0)
+    if [ "$_cur_mod" != "$_settings_pre_mod" ]; then
+        show_message "settings.ini updated by MT5 after ${_waited}s — backing up now."
+        break
+    fi
+    _waited=$((_waited + 1))
+done
+if [ $_waited -ge 20 ]; then
+    show_message "WARNING: settings.ini unchanged after 20s — MT5 may not have written the URL yet."
+fi
 if [ -d "${MT5_CONFIG_DIR}" ]; then
     rm -rf /config/mt5_config_backup
     cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-    show_message "Config/ re-backed-up after GUI whitelist set."
+    show_message "Config/ re-backed-up after GUI whitelist set (mtime pre=$_settings_pre_mod cur=$_cur_mod)."
 fi
-
-# ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
-# Two problems with previous approaches:
-#   1. mt5.terminal_info() fails — can't open a second IPC connection right
-#      after the probe's shutdown() in the same Wine session.
-#   2. xdotool search --name "MetaTrader" finds nothing — window title on
-#      this Wine/KasmVNC build doesn't match that pattern.
-#
-# Fix: read the MT5 JOURNAL LOG to detect the live state (MT5 already writes
-# "expert advisors disabled/enabled" there — no IPC connection needed), and
-# find the window by listing ALL visible X11 windows and matching any title
-# that looks like MT5.
-rm -f /tmp/_mt5_autotrading_before
 
 # Re-patch terminal.ini after MT5 init for next-restart correctness.
 show_message "Re-patching terminal.ini after MT5 init..."
 _patch_terminal_ini
-
-# ── Detect AutoTrading state from MT5 journal log ─────────────────
-MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
-_read_autotrading_from_journal() {
-    # Returns "OFF", "ON", or "UNKNOWN"
-    local _log
-    _log=$(ls -t "${MT5_LOG_DIR}"/*.log 2>/dev/null | head -1)
-    [ -z "${_log}" ] && echo "UNKNOWN" && return
-    python3 - "${_log}" <<'_JOURNAL_PY'
-import sys
-path = sys.argv[1]
-try:
-    data = open(path, 'rb').read()
-    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
-        text = data.decode('utf-16-le', errors='replace')
-    else:
-        text = data.decode('utf-8', errors='replace')
-    lines = text.splitlines()
-    # Scan from the END for the most recent AutoTrading toggle line
-    for line in reversed(lines):
-        lo = line.lower()
-        if 'expert advisors' in lo or 'autotrading' in lo or 'algo trading' in lo:
-            print('LINE:' + line.strip())
-            if 'disabled' in lo or 'off' in lo or '= false' in lo:
-                print('STATE:OFF')
-            else:
-                print('STATE:ON')
-            sys.exit(0)
-except Exception as e:
-    print('ERR:' + str(e))
-print('STATE:UNKNOWN')
-_JOURNAL_PY
-}
-_journal_out=$(_read_autotrading_from_journal)
-show_message "MT5 journal AutoTrading scan: ${_journal_out}"
-_journal_state=$(echo "${_journal_out}" | grep '^STATE:' | cut -d: -f2)
-[ -z "${_journal_state}" ] && _journal_state="UNKNOWN"
-show_message "AutoTrading state from journal: ${_journal_state}"
-
-# ── Send Ctrl+E to enable AutoTrading via Python3/ctypes ──────────
-_mt5_win=$(DISPLAY=:1 python3 - 2>/dev/null <<'_PY_FIND_WIN'
-import ctypes, sys, time
-try:
-    _x11 = ctypes.CDLL('libX11.so.6')
-    _x11.XOpenDisplay.restype = ctypes.c_void_p
-    _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    _x11.XDefaultRootWindow.restype = ctypes.c_ulong
-    _x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-    _x11.XQueryTree.restype = ctypes.c_int
-    _x11.XFetchName.restype = ctypes.c_int
-    _x11.XFetchName.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
-    _x11.XFree.argtypes = [ctypes.c_void_p]
-    dpy = _x11.XOpenDisplay(b':1')
-    if not dpy: sys.exit(1)
-    def _wins(dpy, r):
-        ws=[]; nc=ctypes.c_uint(0); rr=ctypes.c_ulong(0); pr=ctypes.c_ulong(0)
-        ch=ctypes.POINTER(ctypes.c_ulong)()
-        if _x11.XQueryTree(dpy,r,ctypes.byref(rr),ctypes.byref(pr),ctypes.byref(ch),ctypes.byref(nc)) and nc.value:
-            for i in range(nc.value): ws.append(ch[i]); ws.extend(_wins(dpy,ch[i]))
-            _x11.XFree(ch)
-        return ws
-    root = _x11.XDefaultRootWindow(dpy)
-    for wid in _wins(dpy, root):
-        np=ctypes.c_char_p()
-        if _x11.XFetchName(dpy,wid,ctypes.byref(np)) and np.value:
-            n=np.value.decode('utf-8',errors='replace'); _x11.XFree(np)
-            if any(k in n.lower() for k in ['metatrader','icmarkets','hfm','mt5']):
-                print(wid); sys.exit(0)
-except: pass
-_PY_FIND_WIN
-)
-
-if [ -n "${_mt5_win}" ]; then
-    show_message "MT5 window found for AutoTrading toggle: id=${_mt5_win}"
-else
-    show_message "MT5 window not found — AutoTrading must be enabled manually via VNC."
-fi
-
-# ── Send Ctrl+E to enable AutoTrading, up to 4 attempts ──────────
-if [ -n "${_mt5_win}" ]; then
-    _at_max=4
-    _at_attempts=0
-    _at_final="UNKNOWN"
-    while [ ${_at_attempts} -lt ${_at_max} ]; do
-        _at_attempts=$((_at_attempts + 1))
-        show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max} (journal=${_journal_state})..."
-        DISPLAY=:1 python3 -c "
-import ctypes, time
-x11=ctypes.CDLL('libX11.so.6'); xtst=ctypes.CDLL('libXtst.so.6')
-x11.XOpenDisplay.restype=ctypes.c_void_p; x11.XOpenDisplay.argtypes=[ctypes.c_char_p]
-x11.XKeysymToKeycode.restype=ctypes.c_uint; x11.XKeysymToKeycode.argtypes=[ctypes.c_void_p,ctypes.c_ulong]
-xtst.XTestFakeKeyEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
-x11.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int]
-x11.XSetInputFocus.argtypes=[ctypes.c_void_p,ctypes.c_ulong,ctypes.c_int,ctypes.c_ulong]
-dpy=x11.XOpenDisplay(b':1')
-x11.XSetInputFocus(dpy,${_mt5_win},2,0); x11.XSync(dpy,0); time.sleep(0.3)
-ctrl=x11.XKeysymToKeycode(dpy,0xFFE3); e_key=x11.XKeysymToKeycode(dpy,ord('e'))
-xtst.XTestFakeKeyEvent(dpy,ctrl,1,0); x11.XSync(dpy,0); time.sleep(0.05)
-xtst.XTestFakeKeyEvent(dpy,e_key,1,0); x11.XSync(dpy,0); time.sleep(0.05)
-xtst.XTestFakeKeyEvent(dpy,e_key,0,0); x11.XSync(dpy,0); time.sleep(0.05)
-xtst.XTestFakeKeyEvent(dpy,ctrl,0,0); x11.XSync(dpy,0)
-" 2>/dev/null || true
-        sleep 3
-        # Re-read journal to see if the toggle was logged
-        _new_out=$(_read_autotrading_from_journal)
-        _new_state=$(echo "${_new_out}" | grep '^STATE:' | cut -d: -f2)
-        [ -z "${_new_state}" ] && _new_state="UNKNOWN"
-        show_message "  journal after attempt ${_at_attempts}: ${_new_state} (${_new_out})"
-        if [ "${_new_state}" = "ON" ]; then
-            show_message "AutoTrading confirmed ON via journal after ${_at_attempts} attempt(s)."
-            _at_final="ON"
-            break
-        elif [ "${_new_state}" = "OFF" ]; then
-            _journal_state="OFF"   # confirmed still off, send again
-        else
-            # UNKNOWN — journal didn't log a change. Treat first send as success
-            # if we sent at least once; further sends risk toggling OFF.
-            if [ ${_at_attempts} -ge 2 ]; then
-                show_message "Journal state UNKNOWN after ${_at_attempts} attempt(s) — stopping to avoid over-toggling."
-                _at_final="UNKNOWN"
-                break
-            fi
-        fi
-    done
-    if [ "${_at_final}" != "ON" ] && [ "${_at_final}" != "UNKNOWN" ]; then
-        show_message "ERROR: AutoTrading still OFF after ${_at_max} attempts."
-        show_message "  Manual fix: VNC http://localhost:3001 → click AutoTrading toolbar button."
-    fi
-fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
 # THE persistence fix. `docker compose down` sends SIGTERM and the container is
