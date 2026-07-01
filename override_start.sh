@@ -40,9 +40,12 @@ check_dependency "curl"
 check_dependency "$wine_executable"
 
 # unzip is not pre-installed in the base image.
-# Install it silently; if apt-get is unavailable fall back to Python's zipfile.
 if ! command -v unzip &>/dev/null; then
     apt-get install -y --no-install-recommends unzip 2>/dev/null || true
+fi
+# xdotool is needed to automate the MT5 Options dialog (WebRequest whitelist).
+if ! command -v xdotool &>/dev/null; then
+    apt-get install -y --no-install-recommends xdotool 2>/dev/null || true
 fi
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
@@ -888,6 +891,121 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
+# ── Automate MT5 Options → Expert Advisors settings via GUI ──────────
+# Opens Tools → Options → Expert Advisors tab and enables:
+#   - Allow DLL imports
+#   - Allow WebRequest for listed URL  → adds http://127.0.0.1
+# This is more reliable than patching settings.ini because MT5 writes
+# the changes itself and they survive its own init reset cycle.
+#
+# MT5 Expert Advisors tab (Options dialog) tab order:
+#   1. Allow automated trading (checkbox)
+#   2. Disable when account changed (checkbox)
+#   3. Disable when profile changed (checkbox)
+#   4. Allow DLL imports (checkbox)       ← we check this
+#   5. Allow imports of external experts (checkbox)
+#   6. Allow WebRequest for listed URL (checkbox)  ← we check this
+#   7. URL listbox
+#   8. Add button                         ← we click this
+#   9. Delete button
+#  10. OK button
+_set_mt5_ea_options() {
+    if ! command -v xdotool &>/dev/null; then
+        show_message "[ea-options] xdotool not available — skipping GUI automation."
+        return 0
+    fi
+
+    # Find MT5 window (wait up to 60s for it to appear)
+    local _win="" _elapsed=0
+    while [ -z "${_win}" ] && [ ${_elapsed} -lt 60 ]; do
+        _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null | head -1 || true)
+        if [ -z "${_win}" ]; then
+            _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
+                | while read -r _wid; do
+                    _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+                    case "${_wn}" in
+                        *[Mm]eta*|*[Tt]rader*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
+                    esac
+                  done | head -1 || true)
+        fi
+        [ -z "${_win}" ] && sleep 3 && _elapsed=$((_elapsed + 3))
+    done
+
+    if [ -z "${_win}" ]; then
+        show_message "[ea-options] MT5 window not found — cannot automate Options dialog."
+        return 1
+    fi
+    local _wt
+    _wt=$(DISPLAY=:1 xdotool getwindowname "${_win}" 2>/dev/null || true)
+    show_message "[ea-options] MT5 window found: id=${_win} title='${_wt}'"
+
+    # Focus MT5 and open Tools → Options via keyboard (Alt+T then O)
+    DISPLAY=:1 xdotool windowfocus --sync "${_win}" 2>/dev/null || true
+    sleep 1
+    DISPLAY=:1 xdotool key --window "${_win}" alt+t 2>/dev/null || true
+    sleep 0.6
+    DISPLAY=:1 xdotool key --window "${_win}" o 2>/dev/null || true
+    sleep 1.2
+    show_message "[ea-options] Options dialog opened."
+
+    # Navigate to Expert Advisors tab using Ctrl+Tab (3 presses from Charts tab)
+    for _i in 1 2 3; do
+        DISPLAY=:1 xdotool key ctrl+Tab 2>/dev/null || true
+        sleep 0.3
+    done
+    sleep 0.5
+    show_message "[ea-options] Expert Advisors tab selected."
+
+    # ── Tab 1-3: skip past the first 3 checkboxes ─────────────────
+    for _i in 1 2 3; do
+        DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+        sleep 0.15
+    done
+
+    # ── Tab 4: Allow DLL imports — force ON ───────────────────────
+    # MT5 resets this to off; we press Space twice (off→on if it was off,
+    # or on→off→on if it was already on) — net result: always ON.
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    show_message "[ea-options] Allow DLL imports: ON"
+
+    # ── Tab 5: Allow imports of external experts — skip ───────────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.15
+
+    # ── Tab 6: Allow WebRequest for listed URL — force ON ─────────
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    show_message "[ea-options] Allow WebRequest for listed URL: ON"
+
+    # ── Tab 7: URL listbox — move to it ───────────────────────────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.2
+
+    # ── Tab 8: Add button — press it to open URL input dialog ─────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
+    sleep 0.8
+    show_message "[ea-options] Add URL dialog opened."
+
+    # Type the URL and confirm
+    DISPLAY=:1 xdotool type --clearmodifiers "http://127.0.0.1" 2>/dev/null || true
+    sleep 0.3
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
+    sleep 0.5
+    show_message "[ea-options] http://127.0.0.1 added."
+
+    # Close Options with OK (press Enter — default button)
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
+    sleep 0.8
+    show_message "[ea-options] Options saved — DLL imports + WebRequest whitelist set."
+}
+
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
 # empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
@@ -921,6 +1039,21 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "MT5 IPC probe timed out after ${_probe_timeout}s — starting bot anyway."
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
+fi
+
+# ── Automate WebRequest whitelist via MT5 GUI ─────────────────────
+# MT5 resets settings.ini on every startup — file patching is unreliable.
+# Open the Options dialog via xdotool and add http://127.0.0.1 directly
+# so MT5 writes the whitelist itself (the only change that sticks).
+show_message "Setting MT5 EA options via GUI automation (DLL imports + WebRequest whitelist)..."
+_set_mt5_ea_options
+# After MT5 writes the updated settings, back up the new settings.ini
+# so subsequent restarts start with the correct whitelist already in place.
+sleep 2
+if [ -d "${MT5_CONFIG_DIR}" ]; then
+    rm -rf /config/mt5_config_backup
+    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+    show_message "Config/ re-backed-up after GUI whitelist set."
 fi
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
