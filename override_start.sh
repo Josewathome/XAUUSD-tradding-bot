@@ -836,9 +836,26 @@ print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
 PYEOF
 }
 
-# MT5 is being (re)started — relaunch via the [StartUp] config so it opens its
-# own chart and live-attaches the EA (the mechanism that works on this build).
+# MT5 is being (re)started — gracefully close so it writes settings.ini, then
+# backup Config/ before relaunching (captures whitelist MT5 just persisted).
 _relaunch_mt5() {
+    # Try graceful close first so MT5 writes settings.ini
+    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+        $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
+    # Wait up to 10s for graceful exit, then force-kill
+    _rl_wait=0
+    while [ $_rl_wait -lt 10 ] && pgrep -f "terminal64.exe" > /dev/null 2>&1; do
+        sleep 1; _rl_wait=$((_rl_wait + 1))
+    done
+    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+    sleep 2
+    # Backup Config/ now — MT5 has written settings.ini on graceful exit
+    if [ -d "${MT5_CONFIG_DIR}" ]; then
+        rm -rf /config/mt5_config_backup
+        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+        show_message "[relaunch] Config/ backed up after graceful MT5 exit."
+    fi
     _launch_mt5
 }
 
@@ -869,9 +886,6 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
                 _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
                 if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
                     show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — relaunching MT5 with [StartUp]..."
-                    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-                        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
-                    sleep 5
                     _relaunch_mt5
                     _no_feed=0
                     sleep 60      # let MT5 reconnect + run [StartUp] before re-checking
@@ -999,12 +1013,11 @@ def type_str(s):
         else:
             key(ord(ch), 0.05)
 
-# ── Focus MT5 and open Tools → Options (Alt+T, O) ───────────────
+# ── Focus MT5 and open Options via Ctrl+O ────────────────────────
 _x11.XSetInputFocus(dpy, mt5_win, 2, 0)  # RevertToParent=2
 _x11.XSync(dpy, 0)
 time.sleep(1.0)
-combo(XK_Alt_L, ord('t'), 0.6)
-key(ord('o'), 1.2)
+combo(XK_Control_L, ord('o'), 1.5)  # Ctrl+O opens Options dialog directly
 print('[ea-options] Options dialog opened.')
 
 # ── Navigate to Expert Advisors tab (Ctrl+Tab × 3) ──────────────
@@ -1088,27 +1101,11 @@ fi
 # Open the Options dialog via xdotool and add http://127.0.0.1 directly
 # so MT5 writes the whitelist itself (the only change that sticks).
 show_message "Setting MT5 EA options via GUI automation (DLL imports + WebRequest whitelist)..."
-_settings_pre_mod=$(stat -c%Y "${MT5_CONFIG_DIR}/settings.ini" 2>/dev/null || echo 0)
 _set_mt5_ea_options
-# Wait for MT5 to actually write settings.ini (up to 20s, check every second)
-_waited=0
-while [ $_waited -lt 20 ]; do
-    sleep 1
-    _cur_mod=$(stat -c%Y "${MT5_CONFIG_DIR}/settings.ini" 2>/dev/null || echo 0)
-    if [ "$_cur_mod" != "$_settings_pre_mod" ]; then
-        show_message "settings.ini updated by MT5 after ${_waited}s — backing up now."
-        break
-    fi
-    _waited=$((_waited + 1))
-done
-if [ $_waited -ge 20 ]; then
-    show_message "WARNING: settings.ini unchanged after 20s — MT5 may not have written the URL yet."
-fi
-if [ -d "${MT5_CONFIG_DIR}" ]; then
-    rm -rf /config/mt5_config_backup
-    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-    show_message "Config/ re-backed-up after GUI whitelist set (mtime pre=$_settings_pre_mod cur=$_cur_mod)."
-fi
+# NOTE: MT5 does NOT write settings.ini when Options OK is clicked — it writes
+# on graceful exit only. The backup is now taken in _graceful_shutdown() and
+# _relaunch_mt5() after MT5 exits, so the whitelist is captured correctly.
+show_message "GUI automation complete. Settings are active in MT5 memory. Backup will be saved on graceful shutdown."
 
 # Re-patch terminal.ini after MT5 init for next-restart correctness.
 show_message "Re-patching terminal.ini after MT5 init..."
@@ -1127,19 +1124,26 @@ _patch_terminal_ini
 # manual drag, deterministically. We stop the watchdog first so it can't
 # relaunch MT5 mid-shutdown.
 _graceful_shutdown() {
-    show_message "Container stopping — closing MT5 cleanly so it saves the chart+EA session..."
-    # Stop the watchdog and experts-watcher so they don't interfere with shutdown.
+    show_message "Container stopping — closing MT5 cleanly so it saves settings + EA session..."
     [ -n "${_watchdog_pid:-}" ] && kill "${_watchdog_pid}" 2>/dev/null || true
     [ -n "${_experts_watcher_pid:-}" ] && kill "${_experts_watcher_pid}" 2>/dev/null || true
-    # Clean close (NO /F): lets MT5 write its profile/lastsession with the EA.
+    # Clean close (NO /F) so MT5 writes settings.ini + chart session to disk
     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
         $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
-    # Give MT5 time to flush the session to disk before the container dies.
-    sleep 8
-    # Tell the bot to stop (its own SIGTERM handler flushes a checkpoint).
+    # Wait for MT5 to fully exit (up to 15s) so settings.ini is flushed
+    _gs_wait=0
+    while [ $_gs_wait -lt 15 ] && pgrep -f "terminal64.exe" > /dev/null 2>&1; do
+        sleep 1; _gs_wait=$((_gs_wait + 1))
+    done
+    # Backup Config/ NOW — MT5 has written settings.ini (includes WebRequest whitelist)
+    if [ -d "${MT5_CONFIG_DIR}" ]; then
+        rm -rf /config/mt5_config_backup
+        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+        show_message "Config/ backed up on shutdown — whitelist preserved for next restart."
+    fi
     [ -n "${_bot_pid:-}" ] && kill "${_bot_pid}" 2>/dev/null || true
     wait "${_bot_pid:-}" 2>/dev/null || true
-    show_message "Clean shutdown complete — EA session saved for next start."
+    show_message "Clean shutdown complete."
     exit 0
 }
 trap _graceful_shutdown SIGTERM SIGINT
