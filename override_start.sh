@@ -44,10 +44,14 @@ if ! command -v unzip &>/dev/null; then
     apt-get install -y --no-install-recommends unzip 2>/dev/null || true
 fi
 # xdotool is needed to automate the MT5 Options dialog (WebRequest whitelist).
-# Script runs as abc (UID 911) — try sudo first, fall back to plain apt-get.
 if ! command -v xdotool &>/dev/null; then
-    sudo apt-get install -y --no-install-recommends xdotool 2>/dev/null || \
+    apt-get update -qq 2>/dev/null || true
     apt-get install -y --no-install-recommends xdotool 2>/dev/null || true
+    if ! command -v xdotool &>/dev/null; then
+        show_message "WARNING: xdotool install failed — GUI automation will be skipped."
+    else
+        show_message "xdotool installed successfully."
+    fi
 fi
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
