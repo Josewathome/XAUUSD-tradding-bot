@@ -123,47 +123,47 @@ fi
 
 # ── [0/6] Whitelist watcher — protects terminal.ini and experts.ini ──
 # MT5 overwrites these files on every launch, erasing the WebRequest whitelist.
-# This watcher (started before MT5) detects any overwrite within 10s and
-# restores the backup, keeping the whitelist alive through MT5's startup resets.
+# Uses content hash (md5sum) rather than mtime so legitimate in-process writes
+# (e.g. _patch_terminal_ini) do NOT trigger a spurious restore — only a real
+# content change causes a restore.
 (
     _watcher_config_dir="${_MT5_CONFIG_DIR_EARLY}"
     _t_bak="${TERMINAL_INI_BACKUP}"
     _t_live="${TERMINAL_INI_LIVE}"
     _e_bak="${EXPERTS_INI_BACKUP}"
     _e_live="${EXPERTS_INI_LIVE}"
-    _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
-    _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
+    _hash() { md5sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"; }
     while true; do
         sleep 10
         # terminal.ini guard
         if [ -f "${_t_bak}" ]; then
+            _bak_hash=$(_hash "${_t_bak}")
             if [ -f "${_t_live}" ]; then
-                _cur=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
-                if [ "${_cur}" -gt "${_last_t}" ]; then
+                if [ "$(_hash "${_t_live}")" != "${_bak_hash}" ]; then
                     cp "${_t_bak}" "${_t_live}"
-                    _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
-                    show_message "[whitelist-watcher] terminal.ini changed — restored backup."
+                    chown abc:abc "${_t_live}" 2>/dev/null || true
+                    show_message "[whitelist-watcher] terminal.ini content changed — restored backup."
                 fi
             else
                 mkdir -p "${_watcher_config_dir}"
                 cp "${_t_bak}" "${_t_live}"
-                _last_t=$(stat -c%Y "${_t_live}" 2>/dev/null || echo 0)
+                chown abc:abc "${_t_live}" 2>/dev/null || true
                 show_message "[whitelist-watcher] terminal.ini missing — restored from backup."
             fi
         fi
         # experts.ini guard (older build fallback)
         if [ -f "${_e_bak}" ]; then
+            _bak_hash=$(_hash "${_e_bak}")
             if [ -f "${_e_live}" ]; then
-                _cur=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
-                if [ "${_cur}" -gt "${_last_e}" ]; then
+                if [ "$(_hash "${_e_live}")" != "${_bak_hash}" ]; then
                     cp "${_e_bak}" "${_e_live}"
-                    _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
-                    show_message "[whitelist-watcher] experts.ini changed — restored backup."
+                    chown abc:abc "${_e_live}" 2>/dev/null || true
+                    show_message "[whitelist-watcher] experts.ini content changed — restored backup."
                 fi
             else
                 mkdir -p "${_watcher_config_dir}"
                 cp "${_e_bak}" "${_e_live}"
-                _last_e=$(stat -c%Y "${_e_live}" 2>/dev/null || echo 0)
+                chown abc:abc "${_e_live}" 2>/dev/null || true
                 show_message "[whitelist-watcher] experts.ini missing — restored from backup."
             fi
         fi
@@ -534,6 +534,12 @@ result = '\r\n'.join(new_lines) + '\r\n'
 open(path, 'wb').write(bom + result.encode(enc))
 print('terminal.ini patched: ExpertAdvisors=1 AllowDll=1 AllowLive=1 AllowImport=1')
 _PATCH_PYEOF
+    # Keep backup in sync with the patched file so the watcher sees no diff.
+    if [ -f "${TERMINAL_INI_BACKUP}" ] && [ -f "${_ini}" ]; then
+        cp "${_ini}" "${TERMINAL_INI_BACKUP}"
+        chown abc:abc "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
+        chmod 644 "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
+    fi
 }
 _patch_terminal_ini
 show_message "terminal.ini patched for AutoTrading."
