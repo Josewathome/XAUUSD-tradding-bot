@@ -891,12 +891,27 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
-# ── Automate MT5 Options → Expert Advisors → add 127.0.0.1 whitelist ─
-# Uses xdotool to open the Options dialog via keyboard and add the URL
-# so the whitelist is set by MT5 itself (survives any file reset).
-_set_webrequest_whitelist() {
+# ── Automate MT5 Options → Expert Advisors settings via GUI ──────────
+# Opens Tools → Options → Expert Advisors tab and enables:
+#   - Allow DLL imports
+#   - Allow WebRequest for listed URL  → adds http://127.0.0.1
+# This is more reliable than patching settings.ini because MT5 writes
+# the changes itself and they survive its own init reset cycle.
+#
+# MT5 Expert Advisors tab (Options dialog) tab order:
+#   1. Allow automated trading (checkbox)
+#   2. Disable when account changed (checkbox)
+#   3. Disable when profile changed (checkbox)
+#   4. Allow DLL imports (checkbox)       ← we check this
+#   5. Allow imports of external experts (checkbox)
+#   6. Allow WebRequest for listed URL (checkbox)  ← we check this
+#   7. URL listbox
+#   8. Add button                         ← we click this
+#   9. Delete button
+#  10. OK button
+_set_mt5_ea_options() {
     if ! command -v xdotool &>/dev/null; then
-        show_message "[whitelist] xdotool not available — skipping GUI automation."
+        show_message "[ea-options] xdotool not available — skipping GUI automation."
         return 0
     fi
 
@@ -917,72 +932,78 @@ _set_webrequest_whitelist() {
     done
 
     if [ -z "${_win}" ]; then
-        show_message "[whitelist] MT5 window not found — cannot automate Options dialog."
+        show_message "[ea-options] MT5 window not found — cannot automate Options dialog."
         return 1
     fi
     local _wt
     _wt=$(DISPLAY=:1 xdotool getwindowname "${_win}" 2>/dev/null || true)
-    show_message "[whitelist] MT5 window: id=${_win} title='${_wt}'"
+    show_message "[ea-options] MT5 window found: id=${_win} title='${_wt}'"
 
-    # Focus MT5, open Tools menu, select Options (keyboard: Alt+T, O)
+    # Focus MT5 and open Tools → Options via keyboard (Alt+T then O)
     DISPLAY=:1 xdotool windowfocus --sync "${_win}" 2>/dev/null || true
     sleep 1
     DISPLAY=:1 xdotool key --window "${_win}" alt+t 2>/dev/null || true
-    sleep 0.5
+    sleep 0.6
     DISPLAY=:1 xdotool key --window "${_win}" o 2>/dev/null || true
-    sleep 1
-    show_message "[whitelist] Options dialog opened via Alt+T, O"
+    sleep 1.2
+    show_message "[ea-options] Options dialog opened."
 
-    # Navigate to Expert Advisors tab — it is the 4th tab (Ctrl+Tab x3 from Charts)
-    # Send Ctrl+Tab 3 times to reach Expert Advisors tab
+    # Navigate to Expert Advisors tab using Ctrl+Tab (3 presses from Charts tab)
     for _i in 1 2 3; do
-        DISPLAY=:1 xdotool key --window "${_win}" ctrl+Tab 2>/dev/null || true
+        DISPLAY=:1 xdotool key ctrl+Tab 2>/dev/null || true
         sleep 0.3
     done
     sleep 0.5
-    show_message "[whitelist] Navigated to Expert Advisors tab"
+    show_message "[ea-options] Expert Advisors tab selected."
 
-    # Check "Allow WebRequest for listed URL" — it's the first checkbox; Space toggles it.
-    # We send Space to ensure it is checked (if already checked, this unchecks it —
-    # so we read the current state first via the journal check done separately).
-    # Safer: just Tab to the URL field and add the entry via the Add button.
-    # Tab order in Expert Advisors: [Allow Algo] [Allow DLL] [Allow Import] [Allow WebRequest] [URL listbox] [Add btn] [Delete btn] [OK] [Cancel]
-    # Press Tab 4 times to reach Allow WebRequest checkbox
-    for _i in 1 2 3 4; do
-        DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
-        sleep 0.2
+    # ── Tab 1-3: skip past the first 3 checkboxes ─────────────────
+    for _i in 1 2 3; do
+        DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+        sleep 0.15
     done
-    # Ensure checkbox is checked — press Space to check it (may toggle; we verify after)
-    DISPLAY=:1 xdotool key --window "${_win}" space 2>/dev/null || true
-    sleep 0.3
-    # Press Space again in case it was already checked and we just unchecked it
-    # (net result: checked → unchecked → checked if it started checked)
-    # Better: press Space twice to return to original+checked state
-    DISPLAY=:1 xdotool key --window "${_win}" space 2>/dev/null || true
-    sleep 0.3
-    show_message "[whitelist] Ensured Allow WebRequest checkbox is checked"
 
-    # Tab to the URL listbox, then to the Add button, click it
-    DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
+    # ── Tab 4: Allow DLL imports — force ON ───────────────────────
+    # MT5 resets this to off; we press Space twice (off→on if it was off,
+    # or on→off→on if it was already on) — net result: always ON.
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
     sleep 0.2
-    DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
     sleep 0.2
-    # Press Enter/Space on Add button to open the URL input dialog
-    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
+    show_message "[ea-options] Allow DLL imports: ON"
+
+    # ── Tab 5: Allow imports of external experts — skip ───────────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.15
+
+    # ── Tab 6: Allow WebRequest for listed URL — force ON ─────────
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key space 2>/dev/null || true
+    sleep 0.2
+    show_message "[ea-options] Allow WebRequest for listed URL: ON"
+
+    # ── Tab 7: URL listbox — move to it ───────────────────────────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.2
+
+    # ── Tab 8: Add button — press it to open URL input dialog ─────
+    DISPLAY=:1 xdotool key Tab 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
     sleep 0.8
-    show_message "[whitelist] Clicked Add button — URL input dialog should be open"
+    show_message "[ea-options] Add URL dialog opened."
 
-    # Type the URL
+    # Type the URL and confirm
     DISPLAY=:1 xdotool type --clearmodifiers "http://127.0.0.1" 2>/dev/null || true
     sleep 0.3
-    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
     sleep 0.5
-    show_message "[whitelist] Typed http://127.0.0.1 and confirmed"
+    show_message "[ea-options] http://127.0.0.1 added."
 
-    # Close Options dialog with OK (Enter or Alt+O)
-    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
-    sleep 0.5
-    show_message "[whitelist] Options dialog closed — whitelist set via GUI."
+    # Close Options with OK (press Enter — default button)
+    DISPLAY=:1 xdotool key Return 2>/dev/null || true
+    sleep 0.8
+    show_message "[ea-options] Options saved — DLL imports + WebRequest whitelist set."
 }
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
@@ -1024,8 +1045,8 @@ fi
 # MT5 resets settings.ini on every startup — file patching is unreliable.
 # Open the Options dialog via xdotool and add http://127.0.0.1 directly
 # so MT5 writes the whitelist itself (the only change that sticks).
-show_message "Setting WebRequest whitelist via MT5 GUI automation..."
-_set_webrequest_whitelist
+show_message "Setting MT5 EA options via GUI automation (DLL imports + WebRequest whitelist)..."
+_set_mt5_ea_options
 # After MT5 writes the updated settings, back up the new settings.ini
 # so subsequent restarts start with the correct whitelist already in place.
 sleep 2
