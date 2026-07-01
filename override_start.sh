@@ -1021,8 +1021,9 @@ for _ in range(5):
 key(XK_space, 0.2)
 print('[ea-options] Allow DLL imports: ON')
 
-# ── Skip "Allow imports of external experts" ─────────────────────
-key(XK_Tab, 0.15)
+# ── Skip "Allow imports of external experts" then land on WebRequest
+key(XK_Tab, 0.15)   # → item 7: Allow imports of external experts (skip)
+key(XK_Tab, 0.15)   # → item 8: Allow WebRequest for listed URL
 
 # ── Allow WebRequest for listed URL: single Space → OFF→ON ───────
 key(XK_space, 0.2)
@@ -1031,7 +1032,7 @@ print('[ea-options] Allow WebRequest for listed URL: ON')
 # ── Tab to URL listbox, then Tab to Add button, press Enter ───────
 key(XK_Tab, 0.2)
 key(XK_Tab, 0.2)
-key(XK_Return, 0.8)
+key(XK_Return, 2.0)   # wait 2s for Add URL dialog to open before typing
 print('[ea-options] Add URL dialog opened.')
 
 # ── Type http://127.0.0.1 ────────────────────────────────────────
