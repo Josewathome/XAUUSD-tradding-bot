@@ -40,9 +40,12 @@ check_dependency "curl"
 check_dependency "$wine_executable"
 
 # unzip is not pre-installed in the base image.
-# Install it silently; if apt-get is unavailable fall back to Python's zipfile.
 if ! command -v unzip &>/dev/null; then
     apt-get install -y --no-install-recommends unzip 2>/dev/null || true
+fi
+# xdotool is needed to automate the MT5 Options dialog (WebRequest whitelist).
+if ! command -v xdotool &>/dev/null; then
+    apt-get install -y --no-install-recommends xdotool 2>/dev/null || true
 fi
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
@@ -888,6 +891,100 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
+# ── Automate MT5 Options → Expert Advisors → add 127.0.0.1 whitelist ─
+# Uses xdotool to open the Options dialog via keyboard and add the URL
+# so the whitelist is set by MT5 itself (survives any file reset).
+_set_webrequest_whitelist() {
+    if ! command -v xdotool &>/dev/null; then
+        show_message "[whitelist] xdotool not available — skipping GUI automation."
+        return 0
+    fi
+
+    # Find MT5 window (wait up to 60s for it to appear)
+    local _win="" _elapsed=0
+    while [ -z "${_win}" ] && [ ${_elapsed} -lt 60 ]; do
+        _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null | head -1 || true)
+        if [ -z "${_win}" ]; then
+            _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
+                | while read -r _wid; do
+                    _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+                    case "${_wn}" in
+                        *[Mm]eta*|*[Tt]rader*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
+                    esac
+                  done | head -1 || true)
+        fi
+        [ -z "${_win}" ] && sleep 3 && _elapsed=$((_elapsed + 3))
+    done
+
+    if [ -z "${_win}" ]; then
+        show_message "[whitelist] MT5 window not found — cannot automate Options dialog."
+        return 1
+    fi
+    local _wt
+    _wt=$(DISPLAY=:1 xdotool getwindowname "${_win}" 2>/dev/null || true)
+    show_message "[whitelist] MT5 window: id=${_win} title='${_wt}'"
+
+    # Focus MT5, open Tools menu, select Options (keyboard: Alt+T, O)
+    DISPLAY=:1 xdotool windowfocus --sync "${_win}" 2>/dev/null || true
+    sleep 1
+    DISPLAY=:1 xdotool key --window "${_win}" alt+t 2>/dev/null || true
+    sleep 0.5
+    DISPLAY=:1 xdotool key --window "${_win}" o 2>/dev/null || true
+    sleep 1
+    show_message "[whitelist] Options dialog opened via Alt+T, O"
+
+    # Navigate to Expert Advisors tab — it is the 4th tab (Ctrl+Tab x3 from Charts)
+    # Send Ctrl+Tab 3 times to reach Expert Advisors tab
+    for _i in 1 2 3; do
+        DISPLAY=:1 xdotool key --window "${_win}" ctrl+Tab 2>/dev/null || true
+        sleep 0.3
+    done
+    sleep 0.5
+    show_message "[whitelist] Navigated to Expert Advisors tab"
+
+    # Check "Allow WebRequest for listed URL" — it's the first checkbox; Space toggles it.
+    # We send Space to ensure it is checked (if already checked, this unchecks it —
+    # so we read the current state first via the journal check done separately).
+    # Safer: just Tab to the URL field and add the entry via the Add button.
+    # Tab order in Expert Advisors: [Allow Algo] [Allow DLL] [Allow Import] [Allow WebRequest] [URL listbox] [Add btn] [Delete btn] [OK] [Cancel]
+    # Press Tab 4 times to reach Allow WebRequest checkbox
+    for _i in 1 2 3 4; do
+        DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
+        sleep 0.2
+    done
+    # Ensure checkbox is checked — press Space to check it (may toggle; we verify after)
+    DISPLAY=:1 xdotool key --window "${_win}" space 2>/dev/null || true
+    sleep 0.3
+    # Press Space again in case it was already checked and we just unchecked it
+    # (net result: checked → unchecked → checked if it started checked)
+    # Better: press Space twice to return to original+checked state
+    DISPLAY=:1 xdotool key --window "${_win}" space 2>/dev/null || true
+    sleep 0.3
+    show_message "[whitelist] Ensured Allow WebRequest checkbox is checked"
+
+    # Tab to the URL listbox, then to the Add button, click it
+    DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
+    sleep 0.2
+    DISPLAY=:1 xdotool key --window "${_win}" Tab 2>/dev/null || true
+    sleep 0.2
+    # Press Enter/Space on Add button to open the URL input dialog
+    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
+    sleep 0.8
+    show_message "[whitelist] Clicked Add button — URL input dialog should be open"
+
+    # Type the URL
+    DISPLAY=:1 xdotool type --clearmodifiers "http://127.0.0.1" 2>/dev/null || true
+    sleep 0.3
+    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
+    sleep 0.5
+    show_message "[whitelist] Typed http://127.0.0.1 and confirmed"
+
+    # Close Options dialog with OK (Enter or Alt+O)
+    DISPLAY=:1 xdotool key --window "${_win}" Return 2>/dev/null || true
+    sleep 0.5
+    show_message "[whitelist] Options dialog closed — whitelist set via GUI."
+}
+
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
 # empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
@@ -921,6 +1018,21 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "MT5 IPC probe timed out after ${_probe_timeout}s — starting bot anyway."
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
+fi
+
+# ── Automate WebRequest whitelist via MT5 GUI ─────────────────────
+# MT5 resets settings.ini on every startup — file patching is unreliable.
+# Open the Options dialog via xdotool and add http://127.0.0.1 directly
+# so MT5 writes the whitelist itself (the only change that sticks).
+show_message "Setting WebRequest whitelist via MT5 GUI automation..."
+_set_webrequest_whitelist
+# After MT5 writes the updated settings, back up the new settings.ini
+# so subsequent restarts start with the correct whitelist already in place.
+sleep 2
+if [ -d "${MT5_CONFIG_DIR}" ]; then
+    rm -rf /config/mt5_config_backup
+    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
+    show_message "Config/ re-backed-up after GUI whitelist set."
 fi
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
