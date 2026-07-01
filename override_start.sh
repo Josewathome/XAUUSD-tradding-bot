@@ -540,6 +540,14 @@ print('1')
         fi
         echo "${_val}" > /tmp/_mt5_autotrading_before
     }
+    # Restore Config/ backup before EVERY launch (initial + watchdog relaunches).
+    # MT5 resets settings.ini on startup; restoring here ensures the whitelist
+    # (127.0.0.1 for SocketConnect) survives every kill+relaunch cycle.
+    if [ -d /config/mt5_config_backup ]; then
+        mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+        cp -f /config/mt5_config_backup/settings.ini "${_MT5_CONFIG_DIR_EARLY}/settings.ini" 2>/dev/null || true
+        show_message "[launch] settings.ini restored from backup before MT5 start."
+    fi
     _capture_ea_state
     _write_startup_ini
     _patch_terminal_ini
