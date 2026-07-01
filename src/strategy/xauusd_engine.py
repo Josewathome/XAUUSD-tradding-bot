@@ -379,7 +379,12 @@ class XAUUSDStrategyEngine(IStrategyEngine):
         Run full five-gate evaluation on each M1 close.
         Returns a StrategySignal if ALL gates pass, otherwise None.
         """
-        if not m5_candles or len(m5_candles) < max(_EMA_SLOW, 12, _SWEEP_LOOKBACK + 2):
+        _min_bars = max(_EMA_SLOW, 12, _SWEEP_LOOKBACK + 2)
+        if not m5_candles or len(m5_candles) < _min_bars:
+            self._update_structure(
+                symbol, "no_signal",
+                f"warming up ({len(m5_candles) if m5_candles else 0}/{_min_bars} M5 bars)"
+            )
             return None
 
         trigger_m5 = m5_candles[-1]   # Most recently CLOSED M5 candle
