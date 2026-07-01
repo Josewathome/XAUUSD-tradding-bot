@@ -540,9 +540,7 @@ print('1')
         fi
         echo "${_val}" > /tmp/_mt5_autotrading_before
     }
-    # Restore Config/ backup before EVERY launch (initial + watchdog relaunches).
-    # MT5 resets settings.ini on startup; restoring here ensures the whitelist
-    # (127.0.0.1 for SocketConnect) survives every kill+relaunch cycle.
+    # Restore settings.ini before EVERY launch (initial + watchdog relaunches).
     if [ -d /config/mt5_config_backup ]; then
         mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
         cp -f /config/mt5_config_backup/settings.ini "${_MT5_CONFIG_DIR_EARLY}/settings.ini" 2>/dev/null || true
@@ -554,6 +552,16 @@ print('1')
     _empty_default_profile
     DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
         $wine_executable "$mt5file" $MT5_CMD_OPTIONS "/config:${STARTUP_INI_WIN}" &
+    # MT5 overwrites settings.ini ~10s after launch during its init cycle.
+    # Re-restore the backup 25s after launch to put the whitelist back in place
+    # before the EA attempts its first SocketConnect.
+    if [ -d /config/mt5_config_backup ]; then
+        (
+            sleep 25
+            cp -f /config/mt5_config_backup/settings.ini "${_MT5_CONFIG_DIR_EARLY}/settings.ini" 2>/dev/null || true
+            show_message "[launch] settings.ini re-restored 25s post-launch (whitelist locked in)."
+        ) &
+    fi
 }
 
 # ── Decide whether the EA needs recompiling — BEFORE the launch ───
