@@ -284,7 +284,7 @@ def run_stream() -> None:
     strategy: IStrategyEngine = build_engine(config.SYMBOLS)
     logger.info("Seeding strategy engine with historical candles...")
     _strategy_seed_counts = {
-        Timeframe.M5:  30,
+        Timeframe.M5:  55,   # EMA_SLOW=50 requires ≥50 bars; 55 gives a small buffer
         Timeframe.M1:  120,
     }
     for sym in config.SYMBOLS:
