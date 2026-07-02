@@ -133,7 +133,22 @@ else
     $wine_executable reg add "HKEY_CURRENT_USER\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f
     curl -o /config/.wine/drive_c/mt5setup.exe "$mt5setup_url"
     $wine_executable "/config/.wine/drive_c/mt5setup.exe" "/auto"
-    sleep 15
+    # mt5setup.exe is a small bootstrapper — it downloads ~250MB of terminal
+    # files (terminal64.exe, MetaEditor64.exe, metatester64.exe) over the
+    # network AFTER launching, which can take well over a minute on a cold
+    # Wine prefix. Poll for the real binary instead of a fixed sleep so we
+    # never race a slow/fresh install (was `sleep 15` — nowhere near enough).
+    _mt5_install_wait=0
+    _mt5_install_timeout=180
+    while [ ! -e "$mt5file" ] && [ ${_mt5_install_wait} -lt ${_mt5_install_timeout} ]; do
+        sleep 5
+        _mt5_install_wait=$((_mt5_install_wait + 5))
+    done
+    if [ -e "$mt5file" ]; then
+        show_message "[2/6] MT5 binary present after ${_mt5_install_wait}s."
+    else
+        show_message "[2/6] WARNING: MT5 binary still missing after ${_mt5_install_timeout}s — continuing anyway; later steps will report a clearer error."
+    fi
     rm -f /config/.wine/drive_c/mt5setup.exe
 fi
 
