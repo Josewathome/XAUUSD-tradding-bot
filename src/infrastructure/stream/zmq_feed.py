@@ -1,23 +1,30 @@
 """
-zmq_feed.py — TCP Server Feed (EA connects here as TCP client).
+zmq_feed.py — File-Tailing Feed (EA appends to a file; Python polls it).
 
-WHY TCP instead of ZMQ
-ZoneBotBridge v3 uses MT5's built-in SocketCreate/SocketConnect/SocketSend
-instead of #import "libzmq.dll".  MT5 resets DLL import permissions on every
-clean exit, so the permission dialog reappeared on every container restart and
-OnInit() never completed.  Built-in sockets have no permission dialog at all.
+WHY FILES INSTEAD OF SOCKETS
+ZoneBotBridge v3 used MT5's built-in SocketCreate/SocketConnect to avoid the
+DLL-import permission dialog. But SocketConnect() — even to 127.0.0.1 — still
+requires the target in "Allow WebRequest for listed URL", and this MT5 build
+does not persist that permission across ANY process restart (confirmed via
+live testing: neither a forced kill nor a graceful shutdown with a flush
+window preserves it, and an exhaustive search of every ini/dat/reg file in
+the Wine prefix found no trace of it anywhere). That meant a human had to
+re-click the setting after every restart — not viable for unattended trading.
 
-The EA is a TCP CLIENT; this Python process is the TCP SERVER.
+FileOpen/FileWrite to the EA's own MQL5/Files/ sandbox needs no permission
+beyond "Allow algorithmic trading" (confirmed to survive restarts), so v4
+of the EA appends events to a file there instead of sending over a socket.
+This class tails that file by byte offset instead of running a TCP server.
+
 Message format is unchanged: newline-delimited "TOPIC {JSON}" strings.
 The ZmqFeed class name and public API are preserved so main_stream.py is
-unchanged.
+unchanged — same pattern the ZMQ-to-TCP migration used before this one.
 """
 from __future__ import annotations
 
 import json
 import logging
 import queue
-import socket
 import threading
 import time
 from typing import Callable, Dict, Optional
@@ -37,25 +44,24 @@ _TF_MAP: Dict[str, Timeframe] = {
 
 FEED_STOPPED = object()
 
-_ACCEPT_TIMEOUT_S = 1.0
-_RECV_TIMEOUT_S   = 1.0
+_POLL_INTERVAL_S = 0.05
 
-
-def _parse_port(endpoint: str) -> int:
-    """Extract port from 'tcp://host:port'."""
-    s = endpoint
-    if s.startswith("tcp://"):
-        s = s[6:]
-    _, _, port_str = s.partition(":")
-    return int(port_str or 5556)
+# MT5 runs in portable mode here (Config/ and MQL5/ live alongside the
+# terminal executable, confirmed by inspection), so the EA's sandboxed
+# MQL5/Files/ directory is under the install path, not per-user AppData.
+# Python runs inside the same Wine prefix as MT5 (main_stream.py notes
+# os.name == "nt" under Wine), so a Windows-style path resolves correctly.
+_DEFAULT_FEED_FILE = r"C:\Program Files\MetaTrader 5\MQL5\Files\zonebot_feed.jsonl"
 
 
 class ZmqFeed:
     """
-    TCP server that receives newline-delimited messages from the MT5 EA.
+    Tails the file the MT5 EA appends newline-delimited messages to.
 
-    Drop-in replacement for the previous ZMQ-based implementation.
+    Drop-in replacement for the previous TCP-server implementation.
     Same public API: start() / stop() / is_alive / FEED_STOPPED sentinel.
+    The `endpoint` parameter is kept for call-site compatibility but is no
+    longer used to open a socket — pass `feed_file` to override the path.
     """
 
     def __init__(
@@ -63,11 +69,12 @@ class ZmqFeed:
         endpoint:    str,
         builders:    Dict[str, CandleBuilder],
         event_queue: queue.Queue,
+        feed_file:   str = _DEFAULT_FEED_FILE,
     ) -> None:
-        self._port    = _parse_port(endpoint)
-        self._builders = builders
-        self._q        = event_queue
-        self._stop     = threading.Event()
+        self._feed_file = feed_file
+        self._builders  = builders
+        self._q         = event_queue
+        self._stop      = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
         for sym in list(builders.keys()):
@@ -79,87 +86,74 @@ class ZmqFeed:
 
     def start(self) -> None:
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="tcp-feed", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="file-feed", daemon=True)
         self._thread.start()
-        logger.info("TcpFeed: listening on 0.0.0.0:%d for EA connection", self._port)
+        logger.info("FileFeed: tailing %s for EA events", self._feed_file)
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
-        logger.info("TcpFeed: stopped")
+        logger.info("FileFeed: stopped")
 
     @property
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            srv.bind(("0.0.0.0", self._port))
-        except OSError as exc:
-            logger.error("TcpFeed: bind 0.0.0.0:%d failed: %s", self._port, exc)
-            self._q.put(FEED_STOPPED)
-            return
-        srv.listen(1)
-        srv.settimeout(_ACCEPT_TIMEOUT_S)
-        logger.info("TcpFeed: server ready on port %d — waiting for EA", self._port)
-
+        # Binary mode + manual decode: guarantees the byte offset is exact
+        # across separate open() calls (text-mode tell()/seek() cookies are
+        # only formally portable when reused on the *same* file object).
+        offset = 0
+        buf = b""
+        connected = False
         while not self._stop.is_set():
             try:
-                conn, addr = srv.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            logger.info("TcpFeed: EA connected from %s", addr)
-            conn.settimeout(_RECV_TIMEOUT_S)
-            self._handle_connection(conn)
-            logger.info("TcpFeed: EA disconnected — waiting for reconnect")
+                with open(self._feed_file, "rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    if size < offset:
+                        # EA rotated (truncated) the file, or a fresh EA
+                        # session started — restart from the top.
+                        offset = 0
+                        buf = b""
+                        logger.info("FileFeed: feed file shrank — EA restarted, resetting offset")
+                    if not connected:
+                        connected = True
+                        logger.info("FileFeed: EA feed file found — reading events")
+                    if size > offset:
+                        fh.seek(offset)
+                        buf += fh.read(size - offset)
+                        offset = size
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            text = line.decode("utf-8", errors="replace").strip()
+                            if text:
+                                self._dispatch(text)
+            except FileNotFoundError:
+                if connected:
+                    logger.info("FileFeed: feed file disappeared — waiting for EA to recreate it")
+                    connected = False
+                    offset = 0
+                    buf = b""
+            except Exception as exc:
+                logger.warning("FileFeed: read error: %s", exc)
+            time.sleep(_POLL_INTERVAL_S)
 
-        try:
-            srv.close()
-        except Exception:
-            pass
         self._q.put(FEED_STOPPED)
-        logger.info("TcpFeed: thread exiting cleanly")
-
-    def _handle_connection(self, conn: socket.socket) -> None:
-        buf = ""
-        try:
-            while not self._stop.is_set():
-                try:
-                    chunk = conn.recv(4096)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                buf += chunk.decode("utf-8", errors="replace")
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._dispatch(line)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        logger.info("FileFeed: thread exiting cleanly")
 
     def _dispatch(self, raw: str) -> None:
         space = raw.find(" ")
         if space < 0:
-            logger.warning("TcpFeed: malformed message: %r", raw[:80])
+            logger.warning("FileFeed: malformed message: %r", raw[:80])
             return
         topic   = raw[:space]
         payload = raw[space + 1:]
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            logger.warning("TcpFeed: bad JSON topic=%s: %r", topic, payload[:80])
+            logger.warning("FileFeed: bad JSON topic=%s: %r", topic, payload[:80])
             return
 
         if topic == "TICK":
@@ -173,7 +167,7 @@ class ZmqFeed:
         elif topic == "HEARTBEAT":
             self._q.put({"type": "HEARTBEAT", **data})
         else:
-            logger.debug("TcpFeed: unknown topic %s", topic)
+            logger.debug("FileFeed: unknown topic %s", topic)
 
     def _handle_tick(self, data: dict) -> None:
         sym = data.get("sym", "")
@@ -190,7 +184,7 @@ class ZmqFeed:
         tf_s = data.get("tf", "")
         tf   = _TF_MAP.get(tf_s)
         if tf is None:
-            logger.debug("TcpFeed: BAR_CLOSE unknown tf %s", tf_s)
+            logger.debug("FileFeed: BAR_CLOSE unknown tf %s", tf_s)
             return
         builder = self._builders.get(sym)
         if builder:

@@ -80,42 +80,6 @@ else
     show_message "[0/6] kasmvnc.yaml not found — VNC thread patch skipped."
 fi
 
-# ── [0/6] Restore experts.ini whitelist (127.0.0.1 socket access) ─
-# MT5 stores the "Allow WebRequest for listed URL" entries in an encrypted
-# binary Config/experts.ini keyed to the MachineGuid. Without 127.0.0.1 in
-# the list, SocketConnect returns err=4014 and the EA never connects.
-# Since MachineGuid is pinned (constant across restarts), the encrypted blob
-# remains valid — so we can back it up once (after the operator adds 127.0.0.1
-# via VNC) and restore it on every subsequent start.
-_MT5_CONFIG_DIR_EARLY="/config/.wine/drive_c/Program Files/MetaTrader 5/Config"
-EXPERTS_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/experts.ini"
-EXPERTS_INI_BACKUP="/config/experts_ini.bak"
-# Fresh-volume fallback: if a full Config/ backup exists but the live Config has
-# no experts.ini, restore the backed-up files we don't already have (preserves
-# the whitelist whichever file carries it on this build).
-if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
-    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-    cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
-    show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
-fi
-if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
-    mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
-    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-    show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
-elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
-    # If the live file is smaller than the backup it was probably reset by MT5 — restore.
-    _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
-    _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
-    if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
-        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
-        show_message "[0/6] experts.ini restored from backup (live file was smaller/reset)."
-    else
-        show_message "[0/6] experts.ini live file OK."
-    fi
-else
-    show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
-fi
-
 # EA auto-start on this build is handled by the [StartUp] /config: mechanism
 # (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
 # every launch — no reliance on MT5 persisting profile/.chr/order.wnd to disk
@@ -529,28 +493,6 @@ _write_startup_ini() {
     } > "${STARTUP_INI_UNIX}"
 }
 
-# Scraper-forex-bot's long-lived MT5 volume (running 24+ hours, restarted
-# without issue) has a Config/AutoTrade.ini this project's fresh volume never
-# generated — MT5 writes it the first time an EA is attached (manually or via
-# [StartUp]) recording {Name, Symbol, Period, Parameters}. It is NOT confirmed
-# to be what makes the WebRequest/DLL-import permission stick (exhaustive
-# search of every ini/dat/reg file found no plaintext or UTF-16 trace of the
-# whitelist anywhere, in either project) — but it's the one concrete file
-# difference between a volume that persists it and one that doesn't, so we
-# write our own copy (XAUUSD's own EA parameters, not Scraper's) proactively
-# instead of waiting to see if/when MT5 would create it on its own.
-AUTOTRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
-_write_autotrade_ini() {
-    mkdir -p "${MT5_CONFIG_DIR}"
-    {
-        printf '[Expert]\r\n'
-        printf 'Name=ZoneBotBridge\r\n'
-        printf 'Symbol=GBPUSD\r\n'
-        printf 'Period=H1\r\n'
-        printf 'Parameters=PUB_ENDPOINT=tcp://127.0.0.1:5556;SYMBOLS_CSV=XAUUSD,EURUSD;HEARTBEAT_SECS=5\r\n'
-    } > "${AUTOTRADE_INI}"
-}
-
 # Remove any saved charts from the active Default profile so MT5 opens ONLY the
 # chart [StartUp] creates — guarantees exactly one EA instance (the bot's TCP
 # feed is single-client). Safe to call only when MT5 is stopped.
@@ -589,7 +531,6 @@ print('1')
     }
     _capture_ea_state
     _write_startup_ini
-    _write_autotrade_ini
     _patch_terminal_ini
     _empty_default_profile
     DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
@@ -670,9 +611,9 @@ if [ ! -f /config/ready_to_trade ]; then
     echo ""
     echo "  1. Open http://localhost:3002 — confirm MT5 is logged in"
     echo "     and charts are loaded"
-    echo "  2. Tools → Options → Expert Advisors"
-    echo "     → Allow Algorithmic Trading"
-    echo "     → Allow WebRequest for listed URL → add http://127.0.0.1"
+    echo "  2. Tools → Options → Expert Advisors → Allow Algorithmic Trading"
+    echo "     (that's the only permission this EA needs — it uses a file,"
+    echo "     not a socket, so WebRequest/DLL-imports don't apply)"
     echo "  3. Run this command to start the bot:"
     echo "     docker exec xauusd-bot touch /config/ready_to_trade"
     echo ""
@@ -685,26 +626,15 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Back up the whitelist now that the operator has confirmed setup.
-# The "Allow WebRequest for listed URL" entries (which authorize SocketConnect
-# to 127.0.0.1, fixing err=4014) are stored encrypted in MT5's Config dir,
-# keyed to the MachineGuid. MachineGuid is pinned, so the blob stays valid.
-# The exact filename varies by build (experts.ini on some, folded into the
-# encrypted terminal config on others) — so back up every .ini in Config/ and
-# log what's actually there so we capture whichever file carries the whitelist.
-if [ -f "${EXPERTS_INI_LIVE}" ]; then
-    cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-    show_message "experts.ini backed up to ${EXPERTS_INI_BACKUP} (whitelist will auto-restore on future starts)."
-else
-    show_message "NOTE: ${EXPERTS_INI_LIVE} not present on this build. Config/ contents:"
-    ls -la "${MT5_CONFIG_DIR}" 2>/dev/null | sed 's/^/    /' || true
-    # Back up the whole Config dir as a fallback so no whitelist file is missed.
-    if [ -d "${MT5_CONFIG_DIR}" ]; then
-        rm -rf /config/mt5_config_backup
-        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null \
-            && show_message "Full Config/ backed up to /config/mt5_config_backup." \
-            || show_message "WARNING: Config/ backup failed."
-    fi
+# Back up Config/ now that the operator has confirmed setup — preserves
+# login session/credentials state across restarts. (The v4 EA writes to a
+# file instead of a socket, so there's no WebRequest whitelist to chase here
+# any more — this is just general MT5 Config/ preservation.)
+if [ -d "${MT5_CONFIG_DIR}" ]; then
+    rm -rf /config/mt5_config_backup
+    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null \
+        && show_message "Config/ backed up to /config/mt5_config_backup." \
+        || show_message "WARNING: Config/ backup failed."
 fi
 
 # ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
@@ -830,176 +760,40 @@ fi
 # current profile has no charts, the Expert Advisor will not be started").
 #
 # This watchdog makes the EA connection self-healing regardless of HOW MT5 last
-# died. It watches the ONE thing we actually care about: is the EA's TCP client
-# connected to our feed on port 5556? We read that straight from the kernel via
-# /proc/net/tcp (no `ss`/`netstat` dependency, no log parsing):
-#   ESTAB  → an EA is connected      → healthy, do nothing
-#   LISTEN → bot listening, no EA yet → start counting; if it persists, kick MT5
-#   NONE   → bot not listening yet    → still starting up, never kick
-# Force-kill + re-inject + relaunch repeats until the EA connects. It only ever
-# acts at startup or after a failure — once connected it sits idle, so there is
-# ZERO per-tick latency on the live feed.
-#
-# WHY /proc/net/tcp and pgrep (not `wine tasklist`): wine tasklist opens its own
-# wineserver context and sees no processes; the kernel process/socket tables are
-# always authoritative regardless of wineserver state.
-_FEED_PORT=5556
+# died. It watches the ONE thing we actually care about: is the EA actively
+# writing to its feed file? (v4 EA writes via FileOpen/FileWrite instead of a
+# TCP socket — see zmq_feed.py and ZoneBotBridge.mq5 for why.) We check the
+# feed file's mtime instead of a socket state, but keep the same three-state
+# contract (ESTAB/LISTEN/NONE) so the rest of this watchdog is unchanged:
+#   ESTAB  → file written to within the last 30s → an EA is alive, do nothing
+#   LISTEN → file exists but stale               → EA stalled; count, then kick
+#   NONE   → file doesn't exist yet              → still starting up, never kick
+# Force-kill + re-inject + relaunch repeats until the EA is writing again. It
+# only ever acts at startup or after a failure — once healthy it sits idle.
+_FEED_FILE="/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Files/zonebot_feed.jsonl"
+_FEED_STALE_AFTER_SECS=30
 _feed_state() {
-    _FEED_PORT="${_FEED_PORT}" python3 - <<'PYEOF'
-import os
-port = int(os.environ.get("_FEED_PORT", "5556"))
-hexport = format(port, "04X")
-listen = estab = False
-for f in ("/proc/net/tcp", "/proc/net/tcp6"):
-    try:
-        for line in open(f).read().splitlines()[1:]:
-            p = line.split()
-            if len(p) < 4:
-                continue
-            if p[1].rsplit(":", 1)[-1] != hexport:
-                continue
-            if p[3] == "0A":      # TCP_LISTEN
-                listen = True
-            elif p[3] == "01":    # TCP_ESTABLISHED
-                estab = True
-    except Exception:
-        pass
-print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
-PYEOF
-}
-
-# ── Automate "Allow DLL imports" + "Allow WebRequest for listed URL" ──
-# CONFIRMED (2026-07-02, both a forced taskkill /F and a graceful taskkill
-# followed by an 8s flush window): MT5 on this build does NOT persist these
-# two Expert-Advisor permissions across ANY process restart — they reset to
-# unchecked every single time terminal64.exe starts fresh, regardless of how
-# the previous instance was shut down. This is MetaQuotes' own security
-# design (SocketConnect requires the same whitelist as WebRequest, and it is
-# deliberately not exposed via any file we can back up/restore), not a bug
-# in this script. Without 127.0.0.1 whitelisted, the EA's SocketConnect()
-# fails with err=4014 forever, so we re-apply both settings via GUI
-# automation on EVERY launch — not just once like the original attempt at
-# this (in this project's pre-rebuild history) did.
-#
-# Uses xdotool — already proven working in this exact container for the
-# AutoTrading Ctrl+E toggle below, including the KasmVNC XAUTHORITY
-# discovery that a previous ctypes-based attempt at this omitted (which is
-# likely why it silently failed to find windows).
-_XAUTH_DISCOVERED=0
-_discover_xauth() {
-    [ "${_XAUTH_DISCOVERED}" = "1" ] && return 0
-    for _c in /tmp/.Xauthority "${HOME}/.Xauthority" /home/abc/.Xauthority \
-              /root/.Xauthority /config/.Xauthority; do
-        if [ -f "${_c}" ]; then
-            export XAUTHORITY="${_c}"
-            break
-        fi
-    done
-    if [ -z "${XAUTHORITY:-}" ]; then
-        XAUTHORITY=$(ls /tmp/.Xauth* /tmp/.xauth* 2>/dev/null | head -1 || true)
-        [ -n "${XAUTHORITY}" ] && export XAUTHORITY
+    if [ ! -f "${_FEED_FILE}" ]; then
+        echo "NONE"
+        return
     fi
-    _XAUTH_DISCOVERED=1
-}
-
-_find_mt5_window() {
-    _discover_xauth
-    local _win="" _elapsed=0
-    while [ -z "${_win}" ] && [ ${_elapsed} -lt 30 ]; do
-        _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null | head -1 || true)
-        if [ -z "${_win}" ]; then
-            _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
-                | while read -r _wid; do
-                    _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
-                    case "${_wn}" in
-                        *[Mm]eta*|*[Tt]rader*|*terminal64*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
-                    esac
-                  done | head -1 || true)
-        fi
-        [ -n "${_win}" ] && break
-        sleep 3
-        _elapsed=$((_elapsed + 3))
-    done
-    echo "${_win}"
-}
-
-# NOTE: this is a first-pass key sequence based on the Expert Advisors tab
-# layout observed live on 2026-07-02 (Allow algorithmic trading, 4x Disable-*
-# checkboxes, Allow DLL imports, Allow WebRequest for listed URL, URL list,
-# "+ add new URL"). It assumes the Options dialog reopens on the
-# Expert Advisors tab (MT5 remembers the last-used tab — confirmed true in
-# every observed screenshot) and does NOT blindly cycle tabs, since doing so
-# could land on the wrong one. If a future MT5 build changes this layout,
-# the tab counts below need adjusting — the _feed_state check after calling
-# this function is what actually tells us whether it worked.
-_set_webrequest_whitelist() {
-    local _win
-    _win=$(_find_mt5_window)
-    if [ -z "${_win}" ]; then
-        show_message "[webrequest] MT5 window not found — cannot automate whitelist this launch."
-        return 1
+    local _mtime _age
+    _mtime=$(stat -c%Y "${_FEED_FILE}" 2>/dev/null || echo 0)
+    _age=$(( $(date +%s) - _mtime ))
+    if [ "${_age}" -le "${_FEED_STALE_AFTER_SECS}" ]; then
+        echo "ESTAB"
+    else
+        echo "LISTEN"
     fi
-    show_message "[webrequest] MT5 window found (id=${_win}) — opening Options..."
-    DISPLAY=:1 xdotool windowactivate "${_win}" 2>/dev/null || true
-    sleep 1
-    DISPLAY=:1 xdotool key --clearmodifiers ctrl+o
-    sleep 1.5
-    # From "Allow algorithmic trading" (first control), Tab past the 4
-    # "Disable..." checkboxes to reach "Allow DLL imports".
-    for _i in 1 2 3 4 5; do
-        DISPLAY=:1 xdotool key --clearmodifiers Tab
-        sleep 0.2
-    done
-    DISPLAY=:1 xdotool key --clearmodifiers space   # Allow DLL imports: ON
-    sleep 0.2
-    DISPLAY=:1 xdotool key --clearmodifiers Tab     # → Allow WebRequest for listed URL
-    sleep 0.2
-    DISPLAY=:1 xdotool key --clearmodifiers space   # Allow WebRequest: ON
-    sleep 0.3
-    # Tab into the URL area, then to "+ add new URL", press Enter to start
-    # the inline add-row, type the URL, confirm.
-    DISPLAY=:1 xdotool key --clearmodifiers Tab
-    sleep 0.2
-    DISPLAY=:1 xdotool key --clearmodifiers Tab
-    sleep 0.3
-    DISPLAY=:1 xdotool key --clearmodifiers Return
-    sleep 0.5
-    DISPLAY=:1 xdotool type --clearmodifiers --delay 30 "http://127.0.0.1"
-    sleep 0.3
-    DISPLAY=:1 xdotool key --clearmodifiers Return
-    sleep 0.5
-    show_message "[webrequest] http://127.0.0.1 typed — saving with OK."
-    DISPLAY=:1 xdotool key --clearmodifiers Return
-    sleep 1
-    show_message "[webrequest] Options dialog closed."
-}
-
-# Run the automation, then verify against reality (EA connection state) —
-# never just assume the key sequence landed correctly. Retries once with a
-# window refocus in case the first attempt mistimed a step.
-_ensure_webrequest_whitelist() {
-    local _try
-    for _try in 1 2; do
-        _set_webrequest_whitelist
-        sleep 8
-        if [ "$(_feed_state)" = "ESTAB" ]; then
-            show_message "[webrequest] EA connected — whitelist automation confirmed working (attempt ${_try})."
-            return 0
-        fi
-        show_message "[webrequest] EA still not connected after attempt ${_try}/2."
-    done
-    show_message "[webrequest] WARNING: automation did not result in an EA connection after 2 attempts."
-    show_message "  Manual fallback: VNC http://localhost:3002 → Tools → Options → Expert Advisors →"
-    show_message "  check 'Allow DLL imports' + 'Allow WebRequest for listed URL', add http://127.0.0.1, OK."
-    return 1
 }
 
 # MT5 is being (re)started — relaunch via the [StartUp] config so it opens its
 # own chart and live-attaches the EA (the mechanism that works on this build).
+# No GUI automation needed here: the v4 EA writes to a file instead of a
+# socket, which only needs "Allow algorithmic trading" — confirmed to survive
+# restarts — so there's no permission to re-apply after relaunching.
 _relaunch_mt5() {
     _launch_mt5
-    sleep 10   # give the window time to appear before we try to drive it
-    _ensure_webrequest_whitelist
 }
 
 _WATCHDOG_INTERVAL=20
@@ -1028,7 +822,7 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
                 # + attach via [StartUp], then force a clean [StartUp] relaunch.
                 _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
                 if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
-                    show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — relaunching MT5 with [StartUp]..."
+                    show_message "[watchdog] EA feed file stale for ${_no_feed}s — relaunching MT5 with [StartUp]..."
                     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
                         $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
                     sleep 5
@@ -1038,15 +832,15 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
                 fi
                 ;;
             *)
-                # NONE — bot's TcpFeed not listening yet (still starting). Never
-                # kick MT5 during this window; just wait for the feed to come up.
+                # NONE — EA hasn't created the feed file yet (still starting).
+                # Never kick MT5 during this window; just wait for it to appear.
                 _no_feed=0
                 ;;
         esac
     done
 ) &
 _watchdog_pid=$!
-show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
+show_message "MT5 auto-heal watchdog started (monitors EA feed file freshness)."
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
@@ -1082,11 +876,6 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
     show_message "  open VNC (http://localhost:3002) and confirm the terminal is connected."
 fi
-
-# Covers the launch path taken by every boot that reaches this point (fresh
-# install, ready_to_trade resume, or post-compile relaunch above) — the
-# watchdog's own relaunch path calls this same automation independently.
-_ensure_webrequest_whitelist
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
 # Two problems with previous approaches:

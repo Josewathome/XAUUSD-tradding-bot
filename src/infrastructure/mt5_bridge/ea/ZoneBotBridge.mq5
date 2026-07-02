@@ -1,33 +1,39 @@
 //+------------------------------------------------------------------+
-//|  ZoneBotBridge.mq5 v3 — Built-in Socket Transport               |
+//|  ZoneBotBridge.mq5 v4 — File-Based Transport                    |
 //|                                                                  |
-//|  WHY no DLL imports                                              |
-//|  The previous version used #import "libzmq.dll". MT5 shows a    |
-//|  DLL-import permission dialog every restart (resets on exit).    |
-//|  With no user at the VNC OnInit() never completes. v3 uses       |
-//|  MT5's built-in SocketCreate/SocketConnect/SocketSend which      |
-//|  need NO DLL imports and NO permission dialog — EA loads on      |
-//|  every restart automatically.                                    |
+//|  WHY FILES INSTEAD OF SOCKETS                                    |
+//|  v3 used MT5's built-in SocketCreate/SocketConnect to avoid the  |
+//|  DLL-import permission dialog. But SocketConnect() — even to     |
+//|  127.0.0.1 — still requires the target in "Allow WebRequest for  |
+//|  listed URL", and this MT5 build does not persist that setting   |
+//|  across ANY process restart (confirmed: neither a forced kill    |
+//|  nor a graceful shutdown with a flush window preserves it, and   |
+//|  exhaustive search of every ini/dat/reg file in the Wine prefix  |
+//|  found no trace of it anywhere — it is simply not written to     |
+//|  disk). That made the EA need a human to re-click the setting    |
+//|  after every restart, which isn't viable for unattended trading. |
+//|                                                                  |
+//|  FileOpen/FileWrite to the EA's own sandbox (MQL5/Files/) needs  |
+//|  NO special permission beyond "Allow algorithmic trading" — the  |
+//|  one switch that IS confirmed to survive restarts. This version  |
+//|  writes events to a file instead of a socket; Python tails it.   |
 //|                                                                  |
 //|  TRANSPORT                                                       |
-//|  EA = TCP CLIENT  →  connects to Python TCP SERVER on :5556      |
-//|  Messages: newline-delimited "TOPIC {JSON}\n"                    |
-//|  Same topics as v2: TICK / BAR_CLOSE / BAR_OPEN / TRADE /        |
-//|  HEARTBEAT                                                       |
+//|  EA appends newline-delimited "TOPIC {JSON}\n" lines to a file   |
+//|  in its own MQL5/Files/ sandbox. Same topics as v3: TICK /       |
+//|  BAR_CLOSE / BAR_OPEN / TRADE / HEARTBEAT. Python polls the file |
+//|  by byte offset (see zmq_feed.py).                               |
 //+------------------------------------------------------------------+
 #property copyright "ZoneBot"
-#property version   "3.00"
+#property version   "4.00"
 #property strict
 
-input string   PUB_ENDPOINT   = "tcp://127.0.0.1:5556";
+input string   FEED_FILE      = "zonebot_feed.jsonl";
 input string   SYMBOLS_CSV    = "XAUUSD,EURUSD";
 input int      HEARTBEAT_SECS = 5;
+input long     MAX_FILE_BYTES = 20000000;   // rotate (truncate) past ~20MB
 
-string   g_host = "127.0.0.1";
-int      g_port = 5556;
-
-int      g_sock      = INVALID_HANDLE;
-bool     g_connected = false;
+int      g_file = INVALID_HANDLE;
 
 string   g_symbols[];
 int      g_sym_count = 0;
@@ -36,65 +42,37 @@ string   g_bar_keys[];
 datetime g_bar_last_open[];
 int      g_bar_count = 0;
 
-datetime g_last_tick_time    = 0;
-datetime g_last_conn_attempt = 0;
-int      g_conn_retry_secs   = 5;
+datetime g_last_tick_time = 0;
 
-void _ParseEndpoint(const string ep)
+bool _OpenFeedFile()
 {
-   string s = ep;
-   if(StringFind(s, "tcp://") == 0) s = StringSubstr(s, 6);
-   int colon = StringFind(s, ":");
-   if(colon > 0)
+   if(g_file != INVALID_HANDLE) { FileClose(g_file); g_file = INVALID_HANDLE; }
+   // FILE_WRITE truncates — a fresh file each EA session, same as a fresh
+   // TCP connection never replays history. FILE_SHARE_READ/WRITE let
+   // Python's independent OS-level file handle read it concurrently.
+   g_file = FileOpen(FEED_FILE, FILE_WRITE|FILE_READ|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI, 0);
+   if(g_file == INVALID_HANDLE)
    {
-      g_host = StringSubstr(s, 0, colon);
-      g_port = (int)StringToInteger(StringSubstr(s, colon + 1));
+      Print("ZoneBotBridge: FileOpen failed for ", FEED_FILE, " err=", GetLastError());
+      return false;
    }
+   return true;
 }
 
 void _Send(const string msg)
 {
-   if(!g_connected || g_sock == INVALID_HANDLE) return;
-   uchar buf[];
-   int len = StringToCharArray(msg + "\n", buf, 0, -1, CP_UTF8) - 1;
-   if(len <= 0) return;
-   if(SocketSend(g_sock, buf, len) < 0)
-   {
-      Print("ZoneBotBridge: send failed — reconnecting");
-      SocketClose(g_sock);
-      g_sock      = INVALID_HANDLE;
-      g_connected = false;
-   }
-}
-
-void _TryConnect()
-{
-   datetime now = TimeCurrent();
-   if(now - g_last_conn_attempt < g_conn_retry_secs) return;
-   g_last_conn_attempt = now;
-
-   if(g_sock != INVALID_HANDLE) { SocketClose(g_sock); g_sock = INVALID_HANDLE; }
-   g_connected = false;
-
-   g_sock = SocketCreate();
-   if(g_sock == INVALID_HANDLE) { Print("ZoneBotBridge: SocketCreate failed: ", GetLastError()); return; }
-
-   if(SocketConnect(g_sock, g_host, (uint)g_port, 3000))
-   {
-      g_connected = true;
-      Print("ZoneBotBridge: connected to ", g_host, ":", g_port);
-   }
-   else
-   {
-      Print("ZoneBotBridge: connect failed (", g_host, ":", g_port, ") err=", GetLastError(), " retry in ", g_conn_retry_secs, "s");
-      SocketClose(g_sock);
-      g_sock = INVALID_HANDLE;
-   }
+   if(g_file == INVALID_HANDLE) return;
+   FileSeek(g_file, 0, SEEK_END);
+   FileWriteString(g_file, msg + "\n");
+   FileFlush(g_file);
+   // Bound the file size so a long-running session doesn't grow forever —
+   // Python detects the resulting size drop and resets its read offset.
+   if(FileSize(g_file) > MAX_FILE_BYTES)
+      _OpenFeedFile();
 }
 
 int OnInit()
 {
-   _ParseEndpoint(PUB_ENDPOINT);
    g_sym_count = StringSplit(SYMBOLS_CSV, ',', g_symbols);
    if(g_sym_count == 0) { Print("ZoneBotBridge: no symbols"); return INIT_FAILED; }
 
@@ -117,23 +95,22 @@ int OnInit()
       }
    g_bar_count = slot;
 
-   _TryConnect();
+   if(!_OpenFeedFile()) return INIT_FAILED;
    EventSetTimer(1);
-   Print("ZoneBotBridge v3: target=", g_host, ":", g_port);
+   Print("ZoneBotBridge v4: writing to MQL5/Files/", FEED_FILE);
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   if(g_sock != INVALID_HANDLE) { SocketClose(g_sock); g_sock = INVALID_HANDLE; }
-   g_connected = false;
+   if(g_file != INVALID_HANDLE) { FileClose(g_file); g_file = INVALID_HANDLE; }
    Print("ZoneBotBridge: stopped (reason=", reason, ")");
 }
 
 void OnTick()
 {
-   if(!g_connected) { _TryConnect(); return; }
+   if(g_file == INVALID_HANDLE) { _OpenFeedFile(); return; }
    g_last_tick_time = TimeCurrent();
 
    string tfs[5]; tfs[0]="M1"; tfs[1]="M5"; tfs[2]="M30"; tfs[3]="H1"; tfs[4]="H4";
@@ -182,7 +159,7 @@ void OnTick()
 
 void OnTimer()
 {
-   if(!g_connected) { _TryConnect(); return; }
+   if(g_file == INVALID_HANDLE) { _OpenFeedFile(); return; }
    datetime now = TimeCurrent();
    if(now - g_last_tick_time >= HEARTBEAT_SECS)
    {
@@ -196,7 +173,7 @@ void OnTradeTransaction(
    const MqlTradeRequest     &request,
    const MqlTradeResult      &result)
 {
-   if(!g_connected) return;
+   if(g_file == INVALID_HANDLE) return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD &&
       trans.type != TRADE_TRANSACTION_POSITION) return;
    ulong ticket = trans.position;
