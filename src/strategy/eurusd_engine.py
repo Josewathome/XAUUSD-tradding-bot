@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timezone, date
+from datetime import datetime, timedelta, timezone, date
 from typing import Deque, Dict, List, Optional, Tuple
 
 from src.domain.entities import Candle, Direction, Timeframe
@@ -51,24 +51,42 @@ _TP2_RR     = 2.0
 _BE_BUFFER  = 1.0 * _PIP  # breakeven buffer after TP1
 
 
-def _utc_hour(dt: datetime) -> int:
-    if dt.tzinfo is None:
-        return dt.hour
-    return dt.astimezone(timezone.utc).hour
+def _utc_hour(dt: datetime, offset_hours: int = 0) -> int:
+    """
+    Real-UTC hour of a candle timestamp.
+
+    BUG THIS FIXES: candle.time is stamped in the BROKER SERVER's clock
+    (MQL5 iTime()), not real UTC. The old version of this function assumed a
+    naive datetime was already UTC, so the Asian-range window and breakout
+    window below silently evaluated the wrong real-world hours, shifted by
+    the broker's offset (confirmed live: +3h for this broker).
+
+    offset_hours is the broker's live-detected offset from real UTC
+    (config.BROKER_UTC_OFFSET_HOURS — re-detected on every connect, so this
+    adapts automatically if the bot is ever pointed at a different
+    broker/server with a different offset). Pass 0 only for timestamps that
+    are already real UTC.
+    """
+    naive_hour = dt.hour if dt.tzinfo is None else dt.astimezone(timezone.utc).hour
+    return (naive_hour - offset_hours) % 24
 
 
-def _utc_date(dt: datetime) -> date:
-    if dt.tzinfo is None:
-        return dt.date()
-    return dt.astimezone(timezone.utc).date()
+def _utc_date(dt: datetime, offset_hours: int = 0) -> date:
+    """Real-UTC calendar date of a candle timestamp — see _utc_hour."""
+    naive = dt if dt.tzinfo is None else dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return (naive - timedelta(hours=offset_hours)).date()
 
 
-def _asian_range(m1_candles: List[Candle], anchor_date: date) -> Tuple[Optional[float], Optional[float]]:
-    """Return (asian_high, asian_low) from candles in [02:00, 10:00) UTC on anchor_date."""
+def _asian_range(
+    m1_candles: List[Candle],
+    anchor_date: date,
+    offset_hours: int = 0,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Return (asian_high, asian_low) from candles in [02:00, 10:00) real UTC on anchor_date."""
     highs, lows = [], []
     for c in m1_candles:
-        d = _utc_date(c.time)
-        h = _utc_hour(c.time)
+        d = _utc_date(c.time, offset_hours)
+        h = _utc_hour(c.time, offset_hours)
         if d == anchor_date and _ASIAN_START_UTC <= h < _ASIAN_END_UTC:
             highs.append(c.high)
             lows.append(c.low)
@@ -80,7 +98,17 @@ def _asian_range(m1_candles: List[Candle], anchor_date: date) -> Tuple[Optional[
 class EURUSDStrategyEngine(IStrategyEngine):
     """London Breakout engine for EURUSD — one signal per day maximum."""
 
-    def __init__(self, symbols: List[str], tick_buffer: int = 512) -> None:
+    def __init__(
+        self,
+        symbols: List[str],
+        tick_buffer: int = 512,
+        broker_utc_offset_hours: int = 0,
+    ) -> None:
+        # Broker server clock offset from real UTC, live-detected at connect
+        # time (see mt5_gateway.detect_utc_offset / config.BROKER_UTC_OFFSET_HOURS).
+        # The Asian-range and breakout-window checks below need this since
+        # candle.time is stamped in broker-server time, not UTC.
+        self._utc_offset_hours = broker_utc_offset_hours
         self._symbols      = list(symbols)
         self._tick_buffer  = tick_buffer
         self._candles: Dict[str, Dict[Timeframe, Deque[Candle]]] = {s: {} for s in symbols}
@@ -124,8 +152,8 @@ class EURUSDStrategyEngine(IStrategyEngine):
             return None
 
         now_utc  = trigger.time
-        utc_h    = _utc_hour(now_utc)
-        today    = _utc_date(now_utc)
+        utc_h    = _utc_hour(now_utc, self._utc_offset_hours)
+        today    = _utc_date(now_utc, self._utc_offset_hours)
 
         # Only look for breakouts inside the London window
         if not (_ASIAN_END_UTC <= utc_h < _BREAKOUT_END_UTC):
@@ -136,7 +164,7 @@ class EURUSDStrategyEngine(IStrategyEngine):
             return None
 
         # Compute Asian range for today
-        asian_high, asian_low = _asian_range(m1_candles, today)
+        asian_high, asian_low = _asian_range(m1_candles, today, self._utc_offset_hours)
         if asian_high is None:
             _sig_log.debug("%s %s — no Asian candles found for today.", symbol, today)
             return None

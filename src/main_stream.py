@@ -88,14 +88,24 @@ _SEED_COUNTS: Dict[Timeframe, int] = {
 # Until then, the placeholders run the full framework in observation mode: the
 # engine emits no signals and the guardian issues no exit decisions.
 
-def build_engine(symbols) -> IStrategyEngine:
+def build_engine(symbols, broker_utc_offset_hours: int = 0) -> IStrategyEngine:
+    # broker_utc_offset_hours is live-detected per connection (see
+    # gw.detect_utc_offset() below) and passed straight through to the
+    # engines, which need it to convert candle.time (broker-server clock)
+    # into real UTC before any session/time-window gate. This means the
+    # offset adapts automatically if the bot is ever pointed at a different
+    # broker/server — nothing here is hardcoded to one broker's offset.
     xau_syms = [s for s in symbols if s == "XAUUSD"]
     eur_syms = [s for s in symbols if s == "EURUSD"]
     engines = {}
     if xau_syms:
-        engines["XAUUSD"] = XAUUSDStrategyEngine(symbols=xau_syms)
+        engines["XAUUSD"] = XAUUSDStrategyEngine(
+            symbols=xau_syms, broker_utc_offset_hours=broker_utc_offset_hours,
+        )
     if eur_syms:
-        engines["EURUSD"] = EURUSDStrategyEngine(symbols=eur_syms)
+        engines["EURUSD"] = EURUSDStrategyEngine(
+            symbols=eur_syms, broker_utc_offset_hours=broker_utc_offset_hours,
+        )
     return MultiSymbolEngine(engines)
 
 
@@ -281,7 +291,13 @@ def run_stream() -> None:
     _seed_builders(builders, mt5_market_data)
 
     # ── Strategy engine (injected via build_engine) ───────────────────
-    strategy: IStrategyEngine = build_engine(config.SYMBOLS)
+    # Pass the live-detected broker offset so session/time-window gates in
+    # the engines convert candle.time (broker-server clock) to real UTC
+    # correctly — see build_engine()'s docstring comment for why this
+    # matters and how it adapts to a different broker/server automatically.
+    strategy: IStrategyEngine = build_engine(
+        config.SYMBOLS, broker_utc_offset_hours=config.BROKER_UTC_OFFSET_HOURS,
+    )
     logger.info("Seeding strategy engine with historical candles...")
     _strategy_seed_counts = {
         Timeframe.M5:  55,   # EMA_SLOW=50 requires ≥50 bars; 55 gives a small buffer
@@ -344,8 +360,6 @@ def run_stream() -> None:
 
     # ── Entry gate (framework risk gates + sizing) ─────────────────────
     entry_gate = EntryGate(news_manager=news_manager, execution=execution)
-    _startup_balance = (gw.get_account_info() or {}).get("balance", 0.0)
-    entry_gate.on_new_day(_startup_balance)
 
     cleanup    = CleanupService()
     checkpoint = CheckpointService(getattr(config, "CHECKPOINT_DIR", ".checkpoints"))
@@ -353,6 +367,12 @@ def run_stream() -> None:
     scheduler  = Scheduler()
 
     # ── Restore checkpoint ─────────────────────────────────────────────
+    # IMPORTANT: restore entry_gate's daily drawdown baseline BEFORE calling
+    # on_new_day() below — on_new_day() is a no-op if it's already been
+    # called for today (see its _last_new_day_utc guard), so restoring here
+    # first means a mid-day restart keeps the TRUE day-start equity instead
+    # of on_new_day() re-baselining to the (possibly already reduced)
+    # current balance. See EntryGate.load_runtime_state()'s docstring.
     cp = checkpoint.load()
     if cp:
         logger.info("Resumed from checkpoint (saved_at=%s).", cp.get("saved_at"))
@@ -362,6 +382,15 @@ def run_stream() -> None:
                 execution.load_runtime_state(rt_state)
             except Exception as exc:
                 logger.warning("Runtime state restore failed: %s", exc)
+        eg_state = cp.get("entry_gate_state")
+        if eg_state:
+            try:
+                entry_gate.load_runtime_state(eg_state)
+            except Exception as exc:
+                logger.warning("EntryGate state restore failed: %s", exc)
+
+    _startup_balance = (gw.get_account_info() or {}).get("balance", 0.0)
+    entry_gate.on_new_day(_startup_balance)
 
     # ── Dashboard ──────────────────────────────────────────────────────
     try:
@@ -453,7 +482,7 @@ def run_stream() -> None:
             clock.invalidate()
             _now = clock.now()
             if (_now - last_checkpoint).total_seconds() >= cp_interval:
-                _do_checkpoint(execution, checkpoint, _now, loop_n)
+                _do_checkpoint(execution, checkpoint, _now, loop_n, entry_gate)
                 last_checkpoint = _now
             continue
 
@@ -560,14 +589,14 @@ def run_stream() -> None:
 
         # ── Periodic checkpoint ─────────────────────────────────────────
         if (now - last_checkpoint).total_seconds() >= cp_interval:
-            _do_checkpoint(execution, checkpoint, now, loop_n)
+            _do_checkpoint(execution, checkpoint, now, loop_n, entry_gate)
             last_checkpoint = now
 
     # ── Shutdown ───────────────────────────────────────────────────────
     feed.stop()
     scheduler.stop()
     clock.invalidate()
-    _do_checkpoint(execution, checkpoint, clock.now(), loop_n)
+    _do_checkpoint(execution, checkpoint, clock.now(), loop_n, entry_gate)
     gw.disconnect()
     logger.info("Bot stopped cleanly (stream mode).")
 
@@ -749,19 +778,27 @@ def _do_checkpoint(
     checkpoint:  CheckpointService,
     now:         datetime,
     loop_n:      int,
+    entry_gate:  Optional[EntryGate] = None,
 ) -> None:
     try:
         rt_state = execution.save_runtime_state()
     except Exception as exc:
         logger.warning("Runtime state serialisation failed: %s", exc)
         rt_state = {}
+    eg_state = {}
+    if entry_gate is not None:
+        try:
+            eg_state = entry_gate.get_runtime_state()
+        except Exception as exc:
+            logger.warning("EntryGate state serialisation failed: %s", exc)
     checkpoint.save({
-        "loop_n":        loop_n,
-        "symbols":       config.SYMBOLS,
-        "risk_pct":      config.RISK_PERCENT,
-        "min_rr":        config.MIN_RR,
-        "runtime_state": rt_state,
-        "last_loop_ts":  now.isoformat(),
+        "loop_n":           loop_n,
+        "symbols":          config.SYMBOLS,
+        "risk_pct":         config.RISK_PERCENT,
+        "min_rr":           config.MIN_RR,
+        "runtime_state":    rt_state,
+        "entry_gate_state": eg_state,
+        "last_loop_ts":     now.isoformat(),
     }, now=now)
 
 

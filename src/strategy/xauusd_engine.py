@@ -188,26 +188,48 @@ def _vwap_bands(
     return vwap, sd
 
 
-def _session_start_idx(candles: List[Candle], open_hour: int) -> int:
+def _session_start_idx(candles: List[Candle], open_hour: int, offset_hours: int = 0) -> int:
     """
-    Return the index of the first candle at or after open_hour (UTC).
+    Return the index of the first candle at or after open_hour (real UTC).
     Scans backwards from end so we find the MOST RECENT session start.
+
+    offset_hours is the broker server's offset from real UTC (candle.time is
+    stamped in broker-server time, not UTC — see _utc_hour for why this
+    matters). Passing 0 preserves the old (buggy) behavior; callers should
+    always pass the live-detected config.BROKER_UTC_OFFSET_HOURS.
     """
     for i in range(len(candles) - 1, -1, -1):
         t = candles[i].time
         utc_t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
-        if utc_t.hour == open_hour and utc_t.minute == 0:
+        hour = (utc_t.hour - offset_hours) % 24
+        if hour == open_hour and utc_t.minute == 0:
             return i
-        if utc_t.hour == open_hour:
+        if hour == open_hour:
             # First candle AT or AFTER open_hour
-            if i == 0 or _utc_hour(candles[i - 1].time) < open_hour:
+            if i == 0 or _utc_hour(candles[i - 1].time, offset_hours) < open_hour:
                 return i
     return 0
 
 
-def _utc_hour(dt: datetime) -> int:
+def _utc_hour(dt: datetime, offset_hours: int = 0) -> int:
+    """
+    Real-UTC hour of a candle timestamp.
+
+    BUG THIS FIXES: candle.time is stamped in the BROKER SERVER's clock
+    (MQL5 iTime()), not real UTC — confirmed live to differ by several hours
+    depending on broker/server. The old version of this function labeled a
+    naive datetime as UTC without converting it, so every session-window
+    check below (Gate 1 and the VWAP anchoring in Gate 4) silently evaluated
+    the wrong real-world hours, shifted by whatever the broker's offset was.
+
+    offset_hours is the broker's live-detected offset from real UTC
+    (config.BROKER_UTC_OFFSET_HOURS, re-detected on every connect — see
+    mt5_gateway.detect_utc_offset — so this adapts automatically if the bot
+    is ever pointed at a different broker/server with a different offset).
+    Pass 0 only for candle timestamps that are already real UTC.
+    """
     utc = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-    return utc.hour
+    return (utc.hour - offset_hours) % 24
 
 
 def _session_tag(utc_hour: int) -> Optional[str]:
@@ -324,7 +346,17 @@ class XAUUSDStrategyEngine(IStrategyEngine):
     startup from historical MT5 data.
     """
 
-    def __init__(self, symbols: List[str], tick_buffer: int = 512) -> None:
+    def __init__(
+        self,
+        symbols: List[str],
+        tick_buffer: int = 512,
+        broker_utc_offset_hours: int = 0,
+    ) -> None:
+        # Broker server clock offset from real UTC, live-detected at connect
+        # time (see mt5_gateway.detect_utc_offset / config.BROKER_UTC_OFFSET_HOURS).
+        # Every session-window check below needs this since candle.time is
+        # stamped in broker-server time, not UTC.
+        self._utc_offset_hours = broker_utc_offset_hours
         self._symbols      = list(symbols)
         self._candles: Dict[str, Dict[Timeframe, Deque[Candle]]] = {
             s: {} for s in symbols
@@ -395,7 +427,7 @@ class XAUUSDStrategyEngine(IStrategyEngine):
             return None   # Already evaluated this M5 bar
 
         # ── GATE 1: Session check ──────────────────────────────────────────
-        utc_hr  = _utc_hour(trigger_m5.time)
+        utc_hr  = _utc_hour(trigger_m5.time, self._utc_offset_hours)
         session = _session_tag(utc_hr)
         if session is None:
             self._update_structure(symbol, "no_signal", "outside session")
@@ -430,7 +462,7 @@ class XAUUSDStrategyEngine(IStrategyEngine):
 
         # ── GATE 4: VWAP value zone ────────────────────────────────────────
         open_hour  = _LONDON_OPEN_START if session == "LONDON_OPEN" else _NY_OVERLAP_START
-        sess_idx   = _session_start_idx(m5_candles, open_hour)
+        sess_idx   = _session_start_idx(m5_candles, open_hour, self._utc_offset_hours)
         vwap, vwap_sd = _vwap_bands(m5_candles, session_start_idx=sess_idx)
 
         if vwap <= 0 or vwap_sd < 0.01:

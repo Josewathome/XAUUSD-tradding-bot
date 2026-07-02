@@ -333,6 +333,27 @@ class ExecutionService:
         if action.type == GuardianActionType.TRAIL_SL:
             if action.new_sl is None:
                 return
+            # BUG FIXED: interfaces.py's GuardianAction docstring requires
+            # new_sl to "be a risk improvement", but this method used to
+            # call modify_sl() unconditionally with no check — a buggy or
+            # future ITradeGuardian implementation could silently WIDEN
+            # risk (e.g. move a BULLISH trade's SL further below price) and
+            # the framework would apply it with no guard rail. Both current
+            # guardians are no-ops so this was unexercised, but the
+            # mechanical layer shouldn't trust the contract without
+            # verifying it — that's the whole point of a framework boundary.
+            tightens = (
+                action.new_sl >= state.current_sl if state.direction == Direction.BULLISH
+                else action.new_sl <= state.current_sl
+            )
+            if not tightens:
+                logger.warning(
+                    "GUARDIAN_TRAIL [%s] ticket=%s REJECTED — new_sl %.5f would loosen "
+                    "risk vs current %.5f for a %s trade (%s)",
+                    symbol, ticket, action.new_sl, state.current_sl,
+                    state.direction.value.upper(), action.reason,
+                )
+                return
             if self._tr.modify_sl(ticket, action.new_sl):
                 logger.info(
                     "GUARDIAN_TRAIL [%s] ticket=%s | SL %.5f -> %.5f | %s",
@@ -568,7 +589,17 @@ class ExecutionService:
                 self._mfe_last_logged[ticket] = now
 
             # ── TP1 partial close ──────────────────────────────────────
-            if not state.tp1_hit:
+            # BUG FIXED: close_vol used to be max(0.01, ...) with no upper
+            # clamp against state.lot_size. On a min-lot (0.01) trade that
+            # gaps through BOTH tp1_price and tp2_price on the same tick
+            # (plausible for XAUUSD in a news spike), this branch closed the
+            # entire position (0.01 >= lot_size) but only set tp1_hit — so
+            # the TP2 branch below fired again on the same tick against an
+            # already-fully-closed position, double-crediting realized_money
+            # /accumulated_pips for lots that no longer exist. Clamping
+            # close_vol to what's actually left, and marking tp2_hit too
+            # when TP1 consumes the whole runner, closes that gap.
+            if not state.tp1_hit and state.lot_size > 0:
                 tp1_reached = (
                     (state.direction == Direction.BULLISH and price >= state.tp1_price) or
                     (state.direction == Direction.BEARISH and price <= state.tp1_price)
@@ -584,6 +615,8 @@ class ExecutionService:
                     close_vol = max(
                         0.01, round(math.floor(state.lot_size * close_pct * 100) / 100, 2)
                     )
+                    close_vol = min(close_vol, round(state.lot_size, 2))
+                    fully_closed = close_vol >= state.lot_size - 1e-9
                     closed = (self._tr.partial_close_trade(ticket, close_vol, "TP1")
                               if hasattr(self._tr, "partial_close_trade") else False)
                     if closed:
@@ -591,21 +624,25 @@ class ExecutionService:
                         state.realized_money  += tp1_pips * state.pip_value * close_vol
                         state.lot_size         = max(0.0, state.lot_size - close_vol)
                         state.tp1_hit          = True
+                        if fully_closed:
+                            # Nothing left for TP2 to act on this tick or any other.
+                            state.tp2_hit = True
                         state.accumulated_pips += tp1_pips
                         # Move SL to profit-lock level (entry + fraction of initial risk)
                         profit_lock = state.initial_risk * getattr(config, "TP1_PROFIT_LOCK_R", 0.3)
                         lock_sl = (state.entry + profit_lock if state.direction == Direction.BULLISH
                                    else state.entry - profit_lock)
-                        if self._tr.modify_sl(ticket, lock_sl):
+                        if not fully_closed and self._tr.modify_sl(ticket, lock_sl):
                             state.current_sl = lock_sl
                         logger.info(
                             "TP1 hit | ticket=%s | closed %.2f lots | profit-lock SL → %.5f | "
-                            "runner=%.2f lots",
+                            "runner=%.2f lots%s",
                             ticket, close_vol, lock_sl, state.lot_size,
+                            " (fully closed — TP2 skipped)" if fully_closed else "",
                         )
 
             # ── TP2 partial close ──────────────────────────────────────
-            if state.tp1_hit and not state.tp2_hit:
+            if state.tp1_hit and not state.tp2_hit and state.lot_size > 0:
                 tp2_reached = (
                     (state.direction == Direction.BULLISH and price >= state.tp2_price) or
                     (state.direction == Direction.BEARISH and price <= state.tp2_price)
@@ -615,6 +652,7 @@ class ExecutionService:
                     close_vol = max(
                         0.01, round(math.floor(state.lot_size * close_pct * 100) / 100, 2)
                     )
+                    close_vol = min(close_vol, round(state.lot_size, 2))
                     closed = (self._tr.partial_close_trade(ticket, close_vol, "TP2")
                               if hasattr(self._tr, "partial_close_trade") else False)
                     if closed:

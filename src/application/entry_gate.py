@@ -111,6 +111,42 @@ class EntryGate:
         self._session_start_equity = equity
         logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
 
+    def get_runtime_state(self) -> Dict:
+        """Serializable state for checkpointing — see load_runtime_state()."""
+        return {
+            "session_start_equity": self._session_start_equity,
+            "last_new_day_utc":     self._last_new_day_utc,
+        }
+
+    def load_runtime_state(self, state: Dict) -> None:
+        """
+        Restore the daily drawdown baseline from a checkpoint — call this
+        BEFORE the startup on_new_day(balance) call.
+
+        BUG THIS FIXES: on_new_day(balance) is called unconditionally on
+        every process start using the CURRENT account balance. If the
+        process restarts mid-day after the account is already down (e.g.
+        -5%), that used to silently re-baseline the daily drawdown circuit
+        breaker to the current, already-reduced equity — letting the
+        account absorb another full drawdown-limit's worth of loss on top
+        of what it had already lost that day, silently defeating the daily
+        cap across a restart.
+
+        Only restores if the checkpoint is from TODAY (UTC) — a checkpoint
+        from a previous day must NOT seed a stale baseline; on_new_day()'s
+        own day-change check will correctly re-baseline fresh in that case.
+        """
+        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+        saved_day = state.get("last_new_day_utc")
+        if saved_day == today_utc and state.get("session_start_equity") is not None:
+            self._session_start_equity = state["session_start_equity"]
+            self._last_new_day_utc     = saved_day
+            logger.info(
+                "EntryGate: restored today's drawdown baseline from checkpoint "
+                "(equity=%.2f) — surviving a mid-day restart without resetting it.",
+                self._session_start_equity,
+            )
+
     def record_trade(self) -> None:
         today = datetime.now(tz=timezone.utc).date().isoformat()
         self._daily_counts[today] = self._daily_counts.get(today, 0) + 1
