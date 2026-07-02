@@ -117,6 +117,9 @@ class EURUSDStrategyEngine(IStrategyEngine):
         }
         # Per-symbol: date of the last signal fired (prevents duplicate same-day signals)
         self._last_signal_date: Dict[str, Optional[date]] = {s: None for s in symbols}
+        # Current evaluation state (for structure_summary() — logging/monitoring only,
+        # mirrors XAUUSDStrategyEngine's self._structure pattern).
+        self._structure: Dict[str, Dict] = {s: {} for s in symbols}
         logger.info("EURUSDStrategyEngine ready for %s — London Breakout mode.", symbols)
 
     # ── Lifecycle ────────────────────────────────────────────────────
@@ -149,6 +152,7 @@ class EURUSDStrategyEngine(IStrategyEngine):
         # Determine the current UTC hour and date from the most recent closed M1
         trigger = m1_candles[-1] if m1_candles else None
         if trigger is None:
+            self._update_structure(symbol, "no_signal", "warming up (no M1 candles yet)")
             return None
 
         now_utc  = trigger.time
@@ -157,16 +161,23 @@ class EURUSDStrategyEngine(IStrategyEngine):
 
         # Only look for breakouts inside the London window
         if not (_ASIAN_END_UTC <= utc_h < _BREAKOUT_END_UTC):
+            self._update_structure(
+                symbol, "no_signal",
+                f"outside breakout window (asian={_ASIAN_START_UTC:02d}-{_ASIAN_END_UTC:02d} UTC, "
+                f"breakout={_ASIAN_END_UTC:02d}-{_BREAKOUT_END_UTC:02d} UTC, now={utc_h:02d}h)",
+            )
             return None
 
         # One trade per calendar day
         if self._last_signal_date.get(symbol) == today:
+            self._update_structure(symbol, "no_signal", f"already traded today ({today})")
             return None
 
         # Compute Asian range for today
         asian_high, asian_low = _asian_range(m1_candles, today, self._utc_offset_hours)
         if asian_high is None:
             _sig_log.debug("%s %s — no Asian candles found for today.", symbol, today)
+            self._update_structure(symbol, "no_signal", "no Asian-range candles seeded for today")
             return None
 
         asian_range = asian_high - asian_low
@@ -177,11 +188,19 @@ class EURUSDStrategyEngine(IStrategyEngine):
                 "%s %s — range %.1f pips < %.0f pip minimum (RANGE_FILTERED).",
                 symbol, today, asian_range / _PIP, _MIN_RANGE_PIPS,
             )
+            self._update_structure(
+                symbol, "no_signal",
+                f"range too narrow ({asian_range / _PIP:.1f} pips < {_MIN_RANGE_PIPS:.0f} min)",
+            )
             return None
         if asian_range > _MAX_RANGE:
             _sig_log.debug(
                 "%s %s — range %.1f pips > %.0f pip maximum (RANGE_FILTERED).",
                 symbol, today, asian_range / _PIP, _MAX_RANGE_PIPS,
+            )
+            self._update_structure(
+                symbol, "no_signal",
+                f"range too wide ({asian_range / _PIP:.1f} pips > {_MAX_RANGE_PIPS:.0f} max)",
             )
             return None
 
@@ -193,6 +212,11 @@ class EURUSDStrategyEngine(IStrategyEngine):
             direction = Direction.BEARISH
 
         if direction is None:
+            self._update_structure(
+                symbol, "no_signal",
+                f"waiting for breakout (range={asian_low:.5f}-{asian_high:.5f}, "
+                f"price={trigger.close:.5f})",
+            )
             return None
 
         # Compute SL, TP1, TP2
@@ -215,6 +239,7 @@ class EURUSDStrategyEngine(IStrategyEngine):
 
         # Reject degenerate levels
         if sl_dist <= 0:
+            self._update_structure(symbol, "no_signal", f"degenerate SL distance ({sl_dist:.5f})")
             return None
 
         # Confidence: base + bonus for clean range and tight MAE at entry
@@ -229,6 +254,10 @@ class EURUSDStrategyEngine(IStrategyEngine):
 
         tq = min(1.0, confidence)
 
+        self._update_structure(
+            symbol, "signal",
+            f"{direction.value.upper()} breakout, range={range_pips:.1f}pips conf={confidence:.2f}",
+        )
         self._last_signal_date[symbol] = today
 
         sig = StrategySignal(
@@ -268,11 +297,28 @@ class EURUSDStrategyEngine(IStrategyEngine):
         return None
 
     def structure_summary(self, symbol: str) -> Dict[str, str]:
-        last = self._last_signal_date.get(symbol)
-        return {"last_signal_date": str(last) if last else "none"}
+        """
+        Was previously {"last_signal_date": ...} only — main_stream.py's
+        M1 EVAL log line reads struct.get("M1","?")/struct.get("M5","?"),
+        which don't exist in that dict, so it always displayed "M1=? M5=?"
+        regardless of how much data was seeded. Not a data problem — this
+        method just never reported the engine's actual evaluation state.
+        Now mirrors XAUUSDStrategyEngine's _update_structure()/"m1"/"m5"
+        pattern so the log line shows what's actually happening (warming
+        up / outside window / range filtered / waiting for breakout /
+        signal), same as XAUUSD already does.
+        """
+        s = self._structure.get(symbol, {})
+        return {
+            "M1": s.get("m1", "?"),
+            "M5": s.get("m5", "?"),
+        }
 
     def spread_state(self, symbol: str) -> str:
         return "normal"
+
+    def _update_structure(self, symbol: str, status: str, detail: str) -> None:
+        self._structure[symbol] = {"m5": status, "m1": detail}
 
 
 class EURUSDTradeGuardian(ITradeGuardian):
