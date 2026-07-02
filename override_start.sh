@@ -529,6 +529,28 @@ _write_startup_ini() {
     } > "${STARTUP_INI_UNIX}"
 }
 
+# Scraper-forex-bot's long-lived MT5 volume (running 24+ hours, restarted
+# without issue) has a Config/AutoTrade.ini this project's fresh volume never
+# generated — MT5 writes it the first time an EA is attached (manually or via
+# [StartUp]) recording {Name, Symbol, Period, Parameters}. It is NOT confirmed
+# to be what makes the WebRequest/DLL-import permission stick (exhaustive
+# search of every ini/dat/reg file found no plaintext or UTF-16 trace of the
+# whitelist anywhere, in either project) — but it's the one concrete file
+# difference between a volume that persists it and one that doesn't, so we
+# write our own copy (XAUUSD's own EA parameters, not Scraper's) proactively
+# instead of waiting to see if/when MT5 would create it on its own.
+AUTOTRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
+_write_autotrade_ini() {
+    mkdir -p "${MT5_CONFIG_DIR}"
+    {
+        printf '[Expert]\r\n'
+        printf 'Name=ZoneBotBridge\r\n'
+        printf 'Symbol=GBPUSD\r\n'
+        printf 'Period=H1\r\n'
+        printf 'Parameters=PUB_ENDPOINT=tcp://127.0.0.1:5556;SYMBOLS_CSV=XAUUSD,EURUSD;HEARTBEAT_SECS=5\r\n'
+    } > "${AUTOTRADE_INI}"
+}
+
 # Remove any saved charts from the active Default profile so MT5 opens ONLY the
 # chart [StartUp] creates — guarantees exactly one EA instance (the bot's TCP
 # feed is single-client). Safe to call only when MT5 is stopped.
@@ -567,6 +589,7 @@ print('1')
     }
     _capture_ea_state
     _write_startup_ini
+    _write_autotrade_ini
     _patch_terminal_ini
     _empty_default_profile
     DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
