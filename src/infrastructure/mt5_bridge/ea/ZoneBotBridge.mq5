@@ -20,7 +20,7 @@
 #property strict
 
 input string   PUB_ENDPOINT   = "tcp://127.0.0.1:5556";
-input string   SYMBOLS_CSV    = "GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF";
+input string   SYMBOLS_CSV    = "XAUUSD,EURUSD";
 input int      HEARTBEAT_SECS = 5;
 
 string   g_host = "127.0.0.1";

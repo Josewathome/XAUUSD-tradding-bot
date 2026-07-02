@@ -616,19 +616,20 @@ fi
 # /config is a persistent Docker volume — ready_to_trade survives
 # container restarts and power cuts so the bot resumes automatically.
 # Only missing on the very first run, or after:
-#   docker exec scalper-prime rm /config/ready_to_trade  (manual reset)
+#   docker exec xauusd-bot rm /config/ready_to_trade  (manual reset)
 if [ ! -f /config/ready_to_trade ]; then
     echo ""
     echo "════════════════════════════════════════════════════════"
-    echo "  Scalper Bot — first-run setup required"
+    echo "  XAUUSD Bot — first-run setup required"
     echo "════════════════════════════════════════════════════════"
     echo ""
-    echo "  1. Open http://localhost:3001 — confirm MT5 is logged in"
+    echo "  1. Open http://localhost:3002 — confirm MT5 is logged in"
     echo "     and charts are loaded"
     echo "  2. Tools → Options → Expert Advisors"
     echo "     → Allow Algorithmic Trading"
+    echo "     → Allow WebRequest for listed URL → add http://127.0.0.1"
     echo "  3. Run this command to start the bot:"
-    echo "     docker exec scalper-prime touch /config/ready_to_trade"
+    echo "     docker exec xauusd-bot touch /config/ready_to_trade"
     echo ""
     echo "  Waiting for ready_to_trade signal..."
     while [ ! -f /config/ready_to_trade ]; do
@@ -906,7 +907,7 @@ done
 if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "MT5 IPC probe timed out after ${_probe_timeout}s — starting bot anyway."
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
-    show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
+    show_message "  open VNC (http://localhost:3002) and confirm the terminal is connected."
 fi
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
@@ -1027,7 +1028,7 @@ if [ -z "${_mt5_win}" ]; then
             _wc=$(DISPLAY=:1 xdotool getwindowclassname "${_wid}" 2>/dev/null || true)
             show_message "  wid=${_wid} class=${_wc} name='${_wn}'"
         done || true
-    show_message "AutoTrading must be enabled manually: VNC http://localhost:3001 → AutoTrading toolbar button."
+    show_message "AutoTrading must be enabled manually: VNC http://localhost:3002 → AutoTrading toolbar button."
 fi
 
 # ── Send Ctrl+E to enable AutoTrading, up to 4 attempts ──────────
@@ -1067,7 +1068,7 @@ if [ -n "${_mt5_win}" ]; then
     done
     if [ "${_at_final}" != "ON" ] && [ "${_at_final}" != "UNKNOWN" ]; then
         show_message "ERROR: AutoTrading still OFF after ${_at_max} attempts."
-        show_message "  Manual fix: VNC http://localhost:3001 → click AutoTrading toolbar button."
+        show_message "  Manual fix: VNC http://localhost:3002 → click AutoTrading toolbar button."
     fi
 fi
 

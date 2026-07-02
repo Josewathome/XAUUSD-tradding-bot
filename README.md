@@ -143,8 +143,8 @@ reference implementation.
 ```bash
 cp env.example .env          # then edit credentials in .env
 docker compose up -d
-# Dashboard:  http://localhost:8001
-# MT5 (VNC):  http://localhost:3001
+# Dashboard:  http://localhost:8002
+# MT5 (VNC):  http://localhost:3002
 ```
 
 ### Local (requires an MT5 bridge — `mt5linux` or Windows `MetaTrader5`)
