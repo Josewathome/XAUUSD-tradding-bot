@@ -39,10 +39,32 @@ is_wine_python_package_installed() {
 check_dependency "curl"
 check_dependency "$wine_executable"
 
+# This script runs as the abc user (see header comment) — apt-get needs root,
+# so every install below goes through sudo. (Confirmed: a plain apt-get here
+# fails with "Permission denied" on the dpkg lock; abc has passwordless sudo.)
+_apt_lists_refreshed=0
+_apt_install() {
+    if [ "${_apt_lists_refreshed}" -eq 0 ]; then
+        # The WineHQ apt source's signing key isn't trusted in this image,
+        # which makes `apt-get update` exit non-zero — but it still refreshes
+        # every other list first, which is all these installs need.
+        sudo apt-get update >/dev/null 2>&1 || true
+        _apt_lists_refreshed=1
+    fi
+    sudo apt-get install -y --no-install-recommends "$@" 2>&1 | tail -5
+}
+
 # unzip is not pre-installed in the base image.
 # Install it silently; if apt-get is unavailable fall back to Python's zipfile.
 if ! command -v unzip &>/dev/null; then
-    apt-get install -y --no-install-recommends unzip 2>/dev/null || true
+    _apt_install unzip || true
+fi
+
+# xdotool drives the GUI automation later in this script (AutoTrading toggle,
+# WebRequest whitelist) — also not pre-installed in the base image.
+if ! command -v xdotool &>/dev/null; then
+    show_message "Installing xdotool (needed for GUI automation)..."
+    _apt_install xdotool || true
 fi
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
@@ -823,10 +845,138 @@ print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
 PYEOF
 }
 
+# ── Automate "Allow DLL imports" + "Allow WebRequest for listed URL" ──
+# CONFIRMED (2026-07-02, both a forced taskkill /F and a graceful taskkill
+# followed by an 8s flush window): MT5 on this build does NOT persist these
+# two Expert-Advisor permissions across ANY process restart — they reset to
+# unchecked every single time terminal64.exe starts fresh, regardless of how
+# the previous instance was shut down. This is MetaQuotes' own security
+# design (SocketConnect requires the same whitelist as WebRequest, and it is
+# deliberately not exposed via any file we can back up/restore), not a bug
+# in this script. Without 127.0.0.1 whitelisted, the EA's SocketConnect()
+# fails with err=4014 forever, so we re-apply both settings via GUI
+# automation on EVERY launch — not just once like the original attempt at
+# this (in this project's pre-rebuild history) did.
+#
+# Uses xdotool — already proven working in this exact container for the
+# AutoTrading Ctrl+E toggle below, including the KasmVNC XAUTHORITY
+# discovery that a previous ctypes-based attempt at this omitted (which is
+# likely why it silently failed to find windows).
+_XAUTH_DISCOVERED=0
+_discover_xauth() {
+    [ "${_XAUTH_DISCOVERED}" = "1" ] && return 0
+    for _c in /tmp/.Xauthority "${HOME}/.Xauthority" /home/abc/.Xauthority \
+              /root/.Xauthority /config/.Xauthority; do
+        if [ -f "${_c}" ]; then
+            export XAUTHORITY="${_c}"
+            break
+        fi
+    done
+    if [ -z "${XAUTHORITY:-}" ]; then
+        XAUTHORITY=$(ls /tmp/.Xauth* /tmp/.xauth* 2>/dev/null | head -1 || true)
+        [ -n "${XAUTHORITY}" ] && export XAUTHORITY
+    fi
+    _XAUTH_DISCOVERED=1
+}
+
+_find_mt5_window() {
+    _discover_xauth
+    local _win="" _elapsed=0
+    while [ -z "${_win}" ] && [ ${_elapsed} -lt 30 ]; do
+        _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null | head -1 || true)
+        if [ -z "${_win}" ]; then
+            _win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
+                | while read -r _wid; do
+                    _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+                    case "${_wn}" in
+                        *[Mm]eta*|*[Tt]rader*|*terminal64*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
+                    esac
+                  done | head -1 || true)
+        fi
+        [ -n "${_win}" ] && break
+        sleep 3
+        _elapsed=$((_elapsed + 3))
+    done
+    echo "${_win}"
+}
+
+# NOTE: this is a first-pass key sequence based on the Expert Advisors tab
+# layout observed live on 2026-07-02 (Allow algorithmic trading, 4x Disable-*
+# checkboxes, Allow DLL imports, Allow WebRequest for listed URL, URL list,
+# "+ add new URL"). It assumes the Options dialog reopens on the
+# Expert Advisors tab (MT5 remembers the last-used tab — confirmed true in
+# every observed screenshot) and does NOT blindly cycle tabs, since doing so
+# could land on the wrong one. If a future MT5 build changes this layout,
+# the tab counts below need adjusting — the _feed_state check after calling
+# this function is what actually tells us whether it worked.
+_set_webrequest_whitelist() {
+    local _win
+    _win=$(_find_mt5_window)
+    if [ -z "${_win}" ]; then
+        show_message "[webrequest] MT5 window not found — cannot automate whitelist this launch."
+        return 1
+    fi
+    show_message "[webrequest] MT5 window found (id=${_win}) — opening Options..."
+    DISPLAY=:1 xdotool windowactivate "${_win}" 2>/dev/null || true
+    sleep 1
+    DISPLAY=:1 xdotool key --clearmodifiers ctrl+o
+    sleep 1.5
+    # From "Allow algorithmic trading" (first control), Tab past the 4
+    # "Disable..." checkboxes to reach "Allow DLL imports".
+    for _i in 1 2 3 4 5; do
+        DISPLAY=:1 xdotool key --clearmodifiers Tab
+        sleep 0.2
+    done
+    DISPLAY=:1 xdotool key --clearmodifiers space   # Allow DLL imports: ON
+    sleep 0.2
+    DISPLAY=:1 xdotool key --clearmodifiers Tab     # → Allow WebRequest for listed URL
+    sleep 0.2
+    DISPLAY=:1 xdotool key --clearmodifiers space   # Allow WebRequest: ON
+    sleep 0.3
+    # Tab into the URL area, then to "+ add new URL", press Enter to start
+    # the inline add-row, type the URL, confirm.
+    DISPLAY=:1 xdotool key --clearmodifiers Tab
+    sleep 0.2
+    DISPLAY=:1 xdotool key --clearmodifiers Tab
+    sleep 0.3
+    DISPLAY=:1 xdotool key --clearmodifiers Return
+    sleep 0.5
+    DISPLAY=:1 xdotool type --clearmodifiers --delay 30 "http://127.0.0.1"
+    sleep 0.3
+    DISPLAY=:1 xdotool key --clearmodifiers Return
+    sleep 0.5
+    show_message "[webrequest] http://127.0.0.1 typed — saving with OK."
+    DISPLAY=:1 xdotool key --clearmodifiers Return
+    sleep 1
+    show_message "[webrequest] Options dialog closed."
+}
+
+# Run the automation, then verify against reality (EA connection state) —
+# never just assume the key sequence landed correctly. Retries once with a
+# window refocus in case the first attempt mistimed a step.
+_ensure_webrequest_whitelist() {
+    local _try
+    for _try in 1 2; do
+        _set_webrequest_whitelist
+        sleep 8
+        if [ "$(_feed_state)" = "ESTAB" ]; then
+            show_message "[webrequest] EA connected — whitelist automation confirmed working (attempt ${_try})."
+            return 0
+        fi
+        show_message "[webrequest] EA still not connected after attempt ${_try}/2."
+    done
+    show_message "[webrequest] WARNING: automation did not result in an EA connection after 2 attempts."
+    show_message "  Manual fallback: VNC http://localhost:3002 → Tools → Options → Expert Advisors →"
+    show_message "  check 'Allow DLL imports' + 'Allow WebRequest for listed URL', add http://127.0.0.1, OK."
+    return 1
+}
+
 # MT5 is being (re)started — relaunch via the [StartUp] config so it opens its
 # own chart and live-attaches the EA (the mechanism that works on this build).
 _relaunch_mt5() {
     _launch_mt5
+    sleep 10   # give the window time to appear before we try to drive it
+    _ensure_webrequest_whitelist
 }
 
 _WATCHDOG_INTERVAL=20
@@ -909,6 +1059,11 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
     show_message "  open VNC (http://localhost:3002) and confirm the terminal is connected."
 fi
+
+# Covers the launch path taken by every boot that reaches this point (fresh
+# install, ready_to_trade resume, or post-compile relaunch above) — the
+# watchdog's own relaunch path calls this same automation independently.
+_ensure_webrequest_whitelist
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
 # Two problems with previous approaches:
