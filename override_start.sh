@@ -40,10 +40,10 @@ check_dependency "curl"
 check_dependency "$wine_executable"
 
 # unzip is not pre-installed in the base image.
+# Install it silently; if apt-get is unavailable fall back to Python's zipfile.
 if ! command -v unzip &>/dev/null; then
     apt-get install -y --no-install-recommends unzip 2>/dev/null || true
 fi
-# GUI automation uses pure Python3 + libX11/libXtst (ctypes) — no xdotool needed.
 
 # ── [0/6] KasmVNC performance fix ─────────────────────────────────
 KASMVNC_CFG="${HOME}/.vnc/kasmvnc.yaml"
@@ -58,36 +58,30 @@ else
     show_message "[0/6] kasmvnc.yaml not found — VNC thread patch skipped."
 fi
 
-# ── [0/6] Restore WebRequest whitelist (127.0.0.1 socket access) ──
+# ── [0/6] Restore experts.ini whitelist (127.0.0.1 socket access) ─
 # MT5 stores the "Allow WebRequest for listed URL" entries in an encrypted
 # binary Config/experts.ini keyed to the MachineGuid. Without 127.0.0.1 in
 # the list, SocketConnect returns err=4014 and the EA never connects.
 # Since MachineGuid is pinned (constant across restarts), the encrypted blob
-# remains valid — so we back it up once (after the operator adds 127.0.0.1
-# via VNC) and restore it on every subsequent start BEFORE MT5 launches.
+# remains valid — so we can back it up once (after the operator adds 127.0.0.1
+# via VNC) and restore it on every subsequent start.
 _MT5_CONFIG_DIR_EARLY="/config/.wine/drive_c/Program Files/MetaTrader 5/Config"
 EXPERTS_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/experts.ini"
-TERMINAL_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/terminal.ini"
 EXPERTS_INI_BACKUP="/config/experts_ini.bak"
-TERMINAL_INI_BACKUP="/config/terminal_ini.bak"
-
-# Restore the full Config/ backup BEFORE MT5 starts — this is what puts the
-# encrypted whitelist blob back in place after a power cut or docker restart.
-# Use force-copy (not -n) so stale/reset files are replaced with the good backup.
-if [ -d /config/mt5_config_backup ]; then
+# Fresh-volume fallback: if a full Config/ backup exists but the live Config has
+# no experts.ini, restore the backed-up files we don't already have (preserves
+# the whitelist whichever file carries it on this build).
+if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
     mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-    cp -r /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
-    chown -R abc:abc "${_MT5_CONFIG_DIR_EARLY}" 2>/dev/null || true
+    cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
     show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
-else
-    show_message "[0/6] No mt5_config_backup yet — will save after ready_to_trade."
 fi
-# Individual-file fallbacks (older builds or partial backup scenarios).
 if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
     mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
     cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
     show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
 elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
+    # If the live file is smaller than the backup it was probably reset by MT5 — restore.
     _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
     _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
     if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
@@ -462,12 +456,6 @@ result = '\r\n'.join(new_lines) + '\r\n'
 open(path, 'wb').write(bom + result.encode(enc))
 print('terminal.ini patched: ExpertAdvisors=1 AllowDll=1 AllowLive=1 AllowImport=1')
 _PATCH_PYEOF
-    # Keep backup in sync with the patched file so the watcher sees no diff.
-    if [ -f "${TERMINAL_INI_BACKUP}" ] && [ -f "${_ini}" ]; then
-        cp "${_ini}" "${TERMINAL_INI_BACKUP}"
-        chown abc:abc "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-        chmod 644 "${TERMINAL_INI_BACKUP}" 2>/dev/null || true
-    fi
 }
 _patch_terminal_ini
 show_message "terminal.ini patched for AutoTrading."
@@ -540,28 +528,12 @@ print('1')
         fi
         echo "${_val}" > /tmp/_mt5_autotrading_before
     }
-    # Restore settings.ini before EVERY launch (initial + watchdog relaunches).
-    if [ -d /config/mt5_config_backup ]; then
-        mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
-        cp -f /config/mt5_config_backup/settings.ini "${_MT5_CONFIG_DIR_EARLY}/settings.ini" 2>/dev/null || true
-        show_message "[launch] settings.ini restored from backup before MT5 start."
-    fi
     _capture_ea_state
     _write_startup_ini
     _patch_terminal_ini
     _empty_default_profile
     DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
         $wine_executable "$mt5file" $MT5_CMD_OPTIONS "/config:${STARTUP_INI_WIN}" &
-    # MT5 overwrites settings.ini ~10s after launch during its init cycle.
-    # Re-restore the backup 25s after launch to put the whitelist back in place
-    # before the EA attempts its first SocketConnect.
-    if [ -d /config/mt5_config_backup ]; then
-        (
-            sleep 25
-            cp -f /config/mt5_config_backup/settings.ini "${_MT5_CONFIG_DIR_EARLY}/settings.ini" 2>/dev/null || true
-            show_message "[launch] settings.ini re-restored 25s post-launch (whitelist locked in)."
-        ) &
-    fi
 }
 
 # ── Decide whether the EA needs recompiling — BEFORE the launch ───
@@ -629,22 +601,20 @@ fi
 # /config is a persistent Docker volume — ready_to_trade survives
 # container restarts and power cuts so the bot resumes automatically.
 # Only missing on the very first run, or after:
-#   docker exec xauusd-bot rm /config/ready_to_trade  (manual reset)
+#   docker exec scalper-prime rm /config/ready_to_trade  (manual reset)
 if [ ! -f /config/ready_to_trade ]; then
     echo ""
     echo "════════════════════════════════════════════════════════"
-    echo "  XAUUSD Bot — first-run setup required"
+    echo "  Scalper Bot — first-run setup required"
     echo "════════════════════════════════════════════════════════"
     echo ""
     echo "  1. Open http://localhost:3001 — confirm MT5 is logged in"
     echo "     and charts are loaded"
     echo "  2. Tools → Options → Expert Advisors"
     echo "     → Allow Algorithmic Trading"
-    echo "     → Allow WebRequest for listed URL → Add: http://127.0.0.1"
-    echo "     → Click OK"
     echo "  3. Run this command to start the bot:"
-    echo "     docker exec xauusd-bot touch /config/ready_to_trade"
-    echo "     (The script will automatically back up the Config/ settings.)"
+    echo "     docker exec scalper-prime touch /config/ready_to_trade"
+    echo ""
     echo "  Waiting for ready_to_trade signal..."
     while [ ! -f /config/ready_to_trade ]; do
         sleep 5
@@ -654,25 +624,26 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Back up the full Config/ directory now that the operator has confirmed setup.
+# Back up the whitelist now that the operator has confirmed setup.
 # The "Allow WebRequest for listed URL" entries (which authorize SocketConnect
 # to 127.0.0.1, fixing err=4014) are stored encrypted in MT5's Config dir,
 # keyed to the MachineGuid. MachineGuid is pinned, so the blob stays valid.
-# We always replace the backup here so it captures the current live settings
-# (including any whitelist changes made via VNC since the last restart).
+# The exact filename varies by build (experts.ini on some, folded into the
+# encrypted terminal config on others) — so back up every .ini in Config/ and
+# log what's actually there so we capture whichever file carries the whitelist.
 if [ -f "${EXPERTS_INI_LIVE}" ]; then
     cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
-    show_message "experts.ini backed up (whitelist will auto-restore on future starts)."
+    show_message "experts.ini backed up to ${EXPERTS_INI_BACKUP} (whitelist will auto-restore on future starts)."
 else
-    show_message "NOTE: experts.ini not present on this build. Config/ contents:"
+    show_message "NOTE: ${EXPERTS_INI_LIVE} not present on this build. Config/ contents:"
     ls -la "${MT5_CONFIG_DIR}" 2>/dev/null | sed 's/^/    /' || true
-fi
-# Always save a full Config/ snapshot — captures whichever file carries the
-# encrypted whitelist on this MT5 build (terminal.ini, experts.ini, or other).
-if [ -d "${MT5_CONFIG_DIR}" ]; then
-    rm -rf /config/mt5_config_backup
-    cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-    show_message "Full Config/ backed up to /config/mt5_config_backup (whitelist preserved)."
+    # Back up the whole Config dir as a fallback so no whitelist file is missed.
+    if [ -d "${MT5_CONFIG_DIR}" ]; then
+        rm -rf /config/mt5_config_backup
+        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null \
+            && show_message "Full Config/ backed up to /config/mt5_config_backup." \
+            || show_message "WARNING: Config/ backup failed."
+    fi
 fi
 
 # ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
@@ -836,26 +807,9 @@ print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
 PYEOF
 }
 
-# MT5 is being (re)started — gracefully close so it writes settings.ini, then
-# backup Config/ before relaunching (captures whitelist MT5 just persisted).
+# MT5 is being (re)started — relaunch via the [StartUp] config so it opens its
+# own chart and live-attaches the EA (the mechanism that works on this build).
 _relaunch_mt5() {
-    # Try graceful close first so MT5 writes settings.ini
-    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-        $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
-    # Wait up to 10s for graceful exit, then force-kill
-    _rl_wait=0
-    while [ $_rl_wait -lt 10 ] && pgrep -f "terminal64.exe" > /dev/null 2>&1; do
-        sleep 1; _rl_wait=$((_rl_wait + 1))
-    done
-    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
-    sleep 2
-    # Backup Config/ now — MT5 has written settings.ini on graceful exit
-    if [ -d "${MT5_CONFIG_DIR}" ]; then
-        rm -rf /config/mt5_config_backup
-        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-        show_message "[relaunch] Config/ backed up after graceful MT5 exit."
-    fi
     _launch_mt5
 }
 
@@ -886,6 +840,9 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
                 _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
                 if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
                     show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — relaunching MT5 with [StartUp]..."
+                    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+                        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+                    sleep 5
                     _relaunch_mt5
                     _no_feed=0
                     sleep 60      # let MT5 reconnect + run [StartUp] before re-checking
@@ -901,165 +858,6 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 ) &
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
-
-# ── Automate MT5 Options → Expert Advisors settings via GUI ──────────
-# Uses pure Python3 + ctypes (libX11 + libXtst) — no xdotool install needed.
-# Opens Tools → Options → Expert Advisors and enables:
-#   - Allow DLL imports
-#   - Allow WebRequest for listed URL → adds http://127.0.0.1
-_set_mt5_ea_options() {
-    DISPLAY=:1 python3 - <<'_PY_EA_OPTIONS'
-import ctypes, ctypes.util, sys, time, os
-
-# ── Load X11 and Xtst ────────────────────────────────────────────
-try:
-    _x11 = ctypes.CDLL('libX11.so.6')
-    _xtst = ctypes.CDLL('libXtst.so.6')
-except OSError as e:
-    print(f'[ea-options] libX11/libXtst not available: {e}')
-    sys.exit(0)  # non-fatal
-
-# Set up return/arg types
-_x11.XOpenDisplay.restype = ctypes.c_void_p
-_x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-_x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
-_x11.XDefaultRootWindow.restype = ctypes.c_ulong
-_x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-_x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
-_x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-_x11.XFetchName.restype = ctypes.c_int
-_x11.XFetchName.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
-_x11.XFree.argtypes = [ctypes.c_void_p]
-_x11.XQueryTree.restype = ctypes.c_int
-_x11.XKeysymToKeycode.restype = ctypes.c_uint
-_x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-_xtst.XTestFakeKeyEvent.restype = ctypes.c_int
-_xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
-
-dpy = _x11.XOpenDisplay(b':1')
-if not dpy:
-    print('[ea-options] Cannot open display :1')
-    sys.exit(0)
-
-# ── Find MT5 window ──────────────────────────────────────────────
-def _all_windows(dpy, root):
-    wins = []
-    nch = ctypes.c_uint(0)
-    rr = ctypes.c_ulong(0); pr = ctypes.c_ulong(0)
-    ch = ctypes.POINTER(ctypes.c_ulong)()
-    if _x11.XQueryTree(dpy, root, ctypes.byref(rr), ctypes.byref(pr),
-                       ctypes.byref(ch), ctypes.byref(nch)) and nch.value:
-        for i in range(nch.value):
-            wins.append(ch[i])
-            wins.extend(_all_windows(dpy, ch[i]))
-        _x11.XFree(ch)
-    return wins
-
-root = _x11.XDefaultRootWindow(dpy)
-mt5_win = None
-for attempt in range(20):  # wait up to 60s
-    for wid in _all_windows(dpy, root):
-        np = ctypes.c_char_p()
-        if _x11.XFetchName(dpy, wid, ctypes.byref(np)) and np.value:
-            name = np.value.decode('utf-8', errors='replace')
-            _x11.XFree(np)
-            if any(k in name.lower() for k in ['metatrader','icmarkets','hfm','mt5']):
-                mt5_win = wid
-                print(f'[ea-options] MT5 window found: {wid} "{name}"')
-                break
-    if mt5_win:
-        break
-    time.sleep(3)
-
-if not mt5_win:
-    print('[ea-options] MT5 window not found — skipping GUI automation.')
-    _x11.XCloseDisplay(dpy)
-    sys.exit(0)
-
-# ── Key helpers ──────────────────────────────────────────────────
-XK_Tab      = 0xFF09
-XK_Return   = 0xFF0D
-XK_space    = 0x0020
-XK_Alt_L    = 0xFFE9
-XK_Shift_L  = 0xFFE1
-XK_Control_L= 0xFFE3
-
-def _kc(ks):
-    return _x11.XKeysymToKeycode(dpy, ks)
-
-def _press(ks):
-    _xtst.XTestFakeKeyEvent(dpy, _kc(ks), 1, 0)
-    _x11.XSync(dpy, 0)
-
-def _release(ks):
-    _xtst.XTestFakeKeyEvent(dpy, _kc(ks), 0, 0)
-    _x11.XSync(dpy, 0)
-
-def key(ks, delay=0.2):
-    _press(ks); time.sleep(0.05); _release(ks); time.sleep(delay)
-
-def combo(mod, ks, delay=0.3):
-    _press(mod); time.sleep(0.05)
-    _press(ks);  time.sleep(0.05)
-    _release(ks); time.sleep(0.05)
-    _release(mod); time.sleep(delay)
-
-# Type a fixed ASCII string — handles shift for ':' (Shift+;)
-_SHIFT_CHARS = {':': 0x003B, '!': 0x0031, '@': 0x0032}
-def type_str(s):
-    for ch in s:
-        if ch in _SHIFT_CHARS:
-            combo(XK_Shift_L, _SHIFT_CHARS[ch], 0.05)
-        else:
-            key(ord(ch), 0.05)
-
-# ── Focus MT5 and open Options via Ctrl+O ────────────────────────
-_x11.XSetInputFocus(dpy, mt5_win, 2, 0)  # RevertToParent=2
-_x11.XSync(dpy, 0)
-time.sleep(1.0)
-combo(XK_Control_L, ord('o'), 1.5)  # Ctrl+O opens Options dialog directly
-print('[ea-options] Options dialog opened.')
-
-# ── Navigate to Expert Advisors tab (Ctrl+Tab × 3) ──────────────
-for _ in range(3):
-    combo(XK_Control_L, XK_Tab, 0.3)
-time.sleep(0.5)
-print('[ea-options] Expert Advisors tab selected.')
-
-# ── Skip 5 checkboxes before Allow DLL imports ───────────────────
-for _ in range(5):
-    key(XK_Tab, 0.15)
-
-# ── Allow DLL imports: single Space → OFF→ON ─────────────────────
-key(XK_space, 0.2)
-print('[ea-options] Allow DLL imports: ON')
-
-# ── Skip "Allow imports of external experts" then land on WebRequest
-key(XK_Tab, 0.15)   # → item 7: Allow imports of external experts (skip)
-key(XK_Tab, 0.15)   # → item 8: Allow WebRequest for listed URL
-
-# ── Allow WebRequest for listed URL: single Space → OFF→ON ───────
-key(XK_space, 0.2)
-print('[ea-options] Allow WebRequest for listed URL: ON')
-
-# ── Tab to URL listbox, then Tab to Add button, press Enter ───────
-key(XK_Tab, 0.2)
-key(XK_Tab, 0.2)
-key(XK_Return, 2.0)   # wait 2s for Add URL dialog to open before typing
-print('[ea-options] Add URL dialog opened.')
-
-# ── Type http://127.0.0.1 ────────────────────────────────────────
-type_str('http://127.0.0.1')
-key(XK_Return, 0.5)
-print('[ea-options] http://127.0.0.1 added.')
-
-# ── Confirm with OK (Enter) ──────────────────────────────────────
-key(XK_Return, 0.8)
-print('[ea-options] Options saved — DLL imports + WebRequest whitelist set.')
-
-_x11.XCloseDisplay(dpy)
-_PY_EA_OPTIONS
-}
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
@@ -1096,20 +894,167 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
 fi
 
-# ── Automate WebRequest whitelist via MT5 GUI ─────────────────────
-# MT5 resets settings.ini on every startup — file patching is unreliable.
-# Open the Options dialog via xdotool and add http://127.0.0.1 directly
-# so MT5 writes the whitelist itself (the only change that sticks).
-show_message "Setting MT5 EA options via GUI automation (DLL imports + WebRequest whitelist)..."
-_set_mt5_ea_options
-# NOTE: MT5 does NOT write settings.ini when Options OK is clicked — it writes
-# on graceful exit only. The backup is now taken in _graceful_shutdown() and
-# _relaunch_mt5() after MT5 exits, so the whitelist is captured correctly.
-show_message "GUI automation complete. Settings are active in MT5 memory. Backup will be saved on graceful shutdown."
+# ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
+# Two problems with previous approaches:
+#   1. mt5.terminal_info() fails — can't open a second IPC connection right
+#      after the probe's shutdown() in the same Wine session.
+#   2. xdotool search --name "MetaTrader" finds nothing — window title on
+#      this Wine/KasmVNC build doesn't match that pattern.
+#
+# Fix: read the MT5 JOURNAL LOG to detect the live state (MT5 already writes
+# "expert advisors disabled/enabled" there — no IPC connection needed), and
+# find the window by listing ALL visible X11 windows and matching any title
+# that looks like MT5.
+rm -f /tmp/_mt5_autotrading_before
 
 # Re-patch terminal.ini after MT5 init for next-restart correctness.
 show_message "Re-patching terminal.ini after MT5 init..."
 _patch_terminal_ini
+
+# ── Detect AutoTrading state from MT5 journal log ─────────────────
+MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
+_read_autotrading_from_journal() {
+    # Returns "OFF", "ON", or "UNKNOWN"
+    local _log
+    _log=$(ls -t "${MT5_LOG_DIR}"/*.log 2>/dev/null | head -1)
+    [ -z "${_log}" ] && echo "UNKNOWN" && return
+    python3 - "${_log}" <<'_JOURNAL_PY'
+import sys
+path = sys.argv[1]
+try:
+    data = open(path, 'rb').read()
+    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        text = data.decode('utf-16-le', errors='replace')
+    else:
+        text = data.decode('utf-8', errors='replace')
+    lines = text.splitlines()
+    # Scan from the END for the most recent AutoTrading toggle line
+    for line in reversed(lines):
+        lo = line.lower()
+        if 'expert advisors' in lo or 'autotrading' in lo or 'algo trading' in lo:
+            print('LINE:' + line.strip())
+            if 'disabled' in lo or 'off' in lo or '= false' in lo:
+                print('STATE:OFF')
+            else:
+                print('STATE:ON')
+            sys.exit(0)
+except Exception as e:
+    print('ERR:' + str(e))
+print('STATE:UNKNOWN')
+_JOURNAL_PY
+}
+_journal_out=$(_read_autotrading_from_journal)
+show_message "MT5 journal AutoTrading scan: ${_journal_out}"
+_journal_state=$(echo "${_journal_out}" | grep '^STATE:' | cut -d: -f2)
+[ -z "${_journal_state}" ] && _journal_state="UNKNOWN"
+show_message "AutoTrading state from journal: ${_journal_state}"
+
+# ── Find the MT5 X11 window ────────────────────────────────────────
+# KasmVNC's Xvnc server requires the correct XAUTHORITY cookie — without it
+# xdotool silently returns no results. Discover and export the cookie file.
+_xauth_file=""
+for _xauth_candidate in \
+        /tmp/.Xauthority \
+        "${HOME}/.Xauthority" \
+        /home/abc/.Xauthority \
+        /root/.Xauthority \
+        /config/.Xauthority; do
+    if [ -f "${_xauth_candidate}" ]; then
+        _xauth_file="${_xauth_candidate}"
+        break
+    fi
+done
+# Also search /tmp for any .Xauthority-style file (KasmVNC may use a random path)
+if [ -z "${_xauth_file}" ]; then
+    _xauth_file=$(ls /tmp/.Xauth* /tmp/.xauth* 2>/dev/null | head -1 || true)
+fi
+if [ -n "${_xauth_file}" ]; then
+    export XAUTHORITY="${_xauth_file}"
+    show_message "Using XAUTHORITY=${_xauth_file} for xdotool."
+else
+    show_message "WARNING: no XAUTHORITY file found — xdotool may fail on KasmVNC."
+fi
+
+# Wait up to 30s for the window to appear, try multiple patterns.
+_mt5_win=""
+show_message "Searching for MT5 X11 window (up to 30s)..."
+_win_elapsed=0
+while [ -z "${_mt5_win}" ] && [ ${_win_elapsed} -lt 30 ]; do
+    # Try broad regex — matches "MetaTrader 5", "MetaTrader5", MT5 variants
+    _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null \
+        | head -1 || true)
+    # Also try matching any visible window whose title contains known patterns
+    if [ -z "${_mt5_win}" ]; then
+        _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
+            | while read -r _wid; do
+                _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+                case "${_wn}" in
+                    *[Mm]eta*|*[Tt]rader*|*terminal64*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
+                esac
+              done | head -1 || true)
+    fi
+    if [ -n "${_mt5_win}" ]; then
+        _wt=$(DISPLAY=:1 xdotool getwindowname "${_mt5_win}" 2>/dev/null || true)
+        show_message "MT5 window found: id=${_mt5_win} title='${_wt}'"
+        break
+    fi
+    sleep 3
+    _win_elapsed=$((_win_elapsed + 3))
+done
+
+if [ -z "${_mt5_win}" ]; then
+    # Diagnostic: list every visible window (errors shown — no 2>/dev/null) so we
+    # can see if xdotool itself is failing or simply finds no matching windows.
+    show_message "WARNING: MT5 window not found after ${_win_elapsed}s. All visible X11 windows:"
+    DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>&1 | head -30 | \
+        while read -r _wid; do
+            _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+            _wc=$(DISPLAY=:1 xdotool getwindowclassname "${_wid}" 2>/dev/null || true)
+            show_message "  wid=${_wid} class=${_wc} name='${_wn}'"
+        done || true
+    show_message "AutoTrading must be enabled manually: VNC http://localhost:3001 → AutoTrading toolbar button."
+fi
+
+# ── Send Ctrl+E to enable AutoTrading, up to 4 attempts ──────────
+# Only send if: window found AND (journal says OFF, or journal is UNKNOWN).
+# If journal says ON we still send once to be safe (see user requirement),
+# then verify with a second journal read.
+if [ -n "${_mt5_win}" ]; then
+    _at_max=4
+    _at_attempts=0
+    _at_final="UNKNOWN"
+    while [ ${_at_attempts} -lt ${_at_max} ]; do
+        _at_attempts=$((_at_attempts + 1))
+        show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max} (journal=${_journal_state})..."
+        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null || \
+            DISPLAY=:1 xdotool key ctrl+e 2>/dev/null || true
+        sleep 3
+        # Re-read journal to see if the toggle was logged
+        _new_out=$(_read_autotrading_from_journal)
+        _new_state=$(echo "${_new_out}" | grep '^STATE:' | cut -d: -f2)
+        [ -z "${_new_state}" ] && _new_state="UNKNOWN"
+        show_message "  journal after attempt ${_at_attempts}: ${_new_state} (${_new_out})"
+        if [ "${_new_state}" = "ON" ]; then
+            show_message "AutoTrading confirmed ON via journal after ${_at_attempts} attempt(s)."
+            _at_final="ON"
+            break
+        elif [ "${_new_state}" = "OFF" ]; then
+            _journal_state="OFF"   # confirmed still off, send again
+        else
+            # UNKNOWN — journal didn't log a change. Treat first send as success
+            # if we sent at least once; further sends risk toggling OFF.
+            if [ ${_at_attempts} -ge 2 ]; then
+                show_message "Journal state UNKNOWN after ${_at_attempts} attempt(s) — stopping to avoid over-toggling."
+                _at_final="UNKNOWN"
+                break
+            fi
+        fi
+    done
+    if [ "${_at_final}" != "ON" ] && [ "${_at_final}" != "UNKNOWN" ]; then
+        show_message "ERROR: AutoTrading still OFF after ${_at_max} attempts."
+        show_message "  Manual fix: VNC http://localhost:3001 → click AutoTrading toolbar button."
+    fi
+fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
 # THE persistence fix. `docker compose down` sends SIGTERM and the container is
@@ -1124,26 +1069,18 @@ _patch_terminal_ini
 # manual drag, deterministically. We stop the watchdog first so it can't
 # relaunch MT5 mid-shutdown.
 _graceful_shutdown() {
-    show_message "Container stopping — closing MT5 cleanly so it saves settings + EA session..."
+    show_message "Container stopping — closing MT5 cleanly so it saves the chart+EA session..."
+    # Stop the watchdog so it doesn't relaunch MT5 while we're closing it.
     [ -n "${_watchdog_pid:-}" ] && kill "${_watchdog_pid}" 2>/dev/null || true
-    [ -n "${_experts_watcher_pid:-}" ] && kill "${_experts_watcher_pid}" 2>/dev/null || true
-    # Clean close (NO /F) so MT5 writes settings.ini + chart session to disk
+    # Clean close (NO /F): lets MT5 write its profile/lastsession with the EA.
     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
         $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
-    # Wait for MT5 to fully exit (up to 15s) so settings.ini is flushed
-    _gs_wait=0
-    while [ $_gs_wait -lt 15 ] && pgrep -f "terminal64.exe" > /dev/null 2>&1; do
-        sleep 1; _gs_wait=$((_gs_wait + 1))
-    done
-    # Backup Config/ NOW — MT5 has written settings.ini (includes WebRequest whitelist)
-    if [ -d "${MT5_CONFIG_DIR}" ]; then
-        rm -rf /config/mt5_config_backup
-        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null || true
-        show_message "Config/ backed up on shutdown — whitelist preserved for next restart."
-    fi
+    # Give MT5 time to flush the session to disk before the container dies.
+    sleep 8
+    # Tell the bot to stop (its own SIGTERM handler flushes a checkpoint).
     [ -n "${_bot_pid:-}" ] && kill "${_bot_pid}" 2>/dev/null || true
     wait "${_bot_pid:-}" 2>/dev/null || true
-    show_message "Clean shutdown complete."
+    show_message "Clean shutdown complete — EA session saved for next start."
     exit 0
 }
 trap _graceful_shutdown SIGTERM SIGINT
