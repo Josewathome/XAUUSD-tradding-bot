@@ -155,8 +155,8 @@ class CandleBuilder:
                 )
                 continue
 
-            if bar_open_epoch != forming.bar_open:
-                # Bar boundary crossed — finalise and emit the closed candle
+            if bar_open_epoch > forming.bar_open:
+                # Bar boundary crossed FORWARD — finalise and emit the closed candle.
                 self._finalise_bar(tf, forming)
 
                 # Start new forming bar from this tick
@@ -166,11 +166,33 @@ class CandleBuilder:
                     open=mid, high=mid, low=mid, close=mid,
                     tick_vol=1,
                 )
-            else:
+            elif bar_open_epoch == forming.bar_open:
                 # Same bar — update OHLC
                 forming.high    = max(forming.high, mid)
                 forming.low     = min(forming.low,  mid)
                 forming.close   = mid
+                forming.tick_vol += 1
+            else:
+                # BUG THIS FIXES: bar_open_epoch < forming.bar_open means this
+                # tick's timestamp is EARLIER than the bar currently forming —
+                # a late/reordered tick (network jitter, reconnect catch-up
+                # burst). The old code used `!=` instead of a monotonic `>`
+                # check, so a single out-of-order tick would incorrectly
+                # finalise the CURRENT (newer, correct) forming bar and open a
+                # new one anchored to the earlier timestamp — appending a
+                # candle out of chronological order at the end of the closed-
+                # candle cache. That corrupted list order is exactly what let
+                # EURUSDStrategyEngine's "most recent closed M1 candle" jump
+                # backwards in time, breaking its session/date calculations.
+                # Correct handling: a late tick can't retroactively reopen an
+                # already-superseded bar without risking more corruption, so
+                # it's discarded for bar-building purposes (still fine to keep
+                # using it for anything tick-level, e.g. spread/velocity).
+                logger.debug(
+                    "CandleBuilder[%s/%s] discarded late/out-of-order tick "
+                    "(tick_bar=%d < forming_bar=%d)",
+                    self._symbol, tf.value, bar_open_epoch, forming.bar_open,
+                )
                 forming.tick_vol += 1
 
     def on_bar_close_from_ea(
@@ -270,7 +292,20 @@ class CandleBuilder:
             self._on_close(candle)
 
     def _store_closed(self, tf: Timeframe, candle: Candle) -> None:
-        cache    = self._closed[tf]
+        # Defense in depth: consumers (e.g. EURUSDStrategyEngine's Asian-range
+        # scan) rely on this cache being strictly chronological with the
+        # newest candle at the end. on_tick()'s monotonic guard is the primary
+        # fix for the out-of-order-tick bug this addresses, but a second bad
+        # candle from any current or future caller shouldn't be able to
+        # silently corrupt this invariant again.
+        cache = self._closed[tf]
+        if cache and candle.time <= cache[-1].time:
+            logger.warning(
+                "CandleBuilder[%s/%s] discarded out-of-order candle "
+                "(candle.time=%s <= last.time=%s)",
+                self._symbol, tf.value, candle.time, cache[-1].time,
+            )
+            return
         max_size = self._max_cache[tf]
         cache.append(candle)
         if len(cache) > max_size:
