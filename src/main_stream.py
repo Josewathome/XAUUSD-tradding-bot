@@ -637,6 +637,11 @@ def _run_strategy_evaluation(
     # increase for XAUUSD — safe to share the same fetch across both.
     m1_candles = builder.get_closed_candles(TF.M1, 780)
     m5_candles = builder.get_closed_candles(TF.M5, 55)
+    if symbol == "EURUSD" and m1_candles:
+        logger.info(
+            "DIAG[%s] m1_candles: count=%d first=%s last=%s",
+            symbol, len(m1_candles), m1_candles[0].time, m1_candles[-1].time,
+        )
     forming_m1 = builder.get_forming_bar(TF.M1)
 
     if not m1_candles or not m5_candles:
