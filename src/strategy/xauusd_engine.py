@@ -390,8 +390,8 @@ class XAUUSDStrategyEngine(IStrategyEngine):
         self._structure: Dict[str, Dict] = {s: {} for s in symbols}
 
         logger.info(
-            "XAUUSDStrategyEngine ready for %d symbol(s): %s",
-            len(symbols), ", ".join(symbols),
+            "XAUUSDStrategyEngine ready for %d symbol(s): %s (broker_utc_offset_hours=%d)",
+            len(symbols), ", ".join(symbols), self._utc_offset_hours,
         )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
