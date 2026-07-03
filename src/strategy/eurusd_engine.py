@@ -117,6 +117,13 @@ class EURUSDStrategyEngine(IStrategyEngine):
         }
         # Per-symbol: date of the last signal fired (prevents duplicate same-day signals)
         self._last_signal_date: Dict[str, Optional[date]] = {s: None for s in symbols}
+        # Per-symbol: (date, high, low) — the Asian range is computed ONCE per
+        # calendar day and cached here, matching how this strategy is meant to
+        # work (a real London-Breakout range is a fixed fact for the day once
+        # the Asian session closes, not something re-derived on every M1
+        # close). Also means a mid-window M1 buffer change/eviction can no
+        # longer silently shift the range after it's locked in.
+        self._daily_range: Dict[str, Tuple[date, float, float]] = {}
         # Current evaluation state (for structure_summary() — logging/monitoring only,
         # mirrors XAUUSDStrategyEngine's self._structure pattern).
         self._structure: Dict[str, Dict] = {s: {} for s in symbols}
@@ -195,8 +202,17 @@ class EURUSDStrategyEngine(IStrategyEngine):
             self._update_structure(symbol, "no_signal", f"already traded today ({today})")
             return None
 
-        # Compute Asian range for today
-        asian_high, asian_low = _asian_range(m1_candles, today, self._utc_offset_hours)
+        # Asian range is computed ONCE per calendar day and cached — see the
+        # _daily_range comment in __init__ for why. Reuse the cached value on
+        # every subsequent M1 close within the breakout window instead of
+        # re-scanning raw M1 history each time.
+        cached = self._daily_range.get(symbol)
+        if cached is not None and cached[0] == today:
+            asian_high, asian_low = cached[1], cached[2]
+        else:
+            asian_high, asian_low = _asian_range(m1_candles, today, self._utc_offset_hours)
+            if asian_high is not None:
+                self._daily_range[symbol] = (today, asian_high, asian_low)
         if asian_high is None:
             _sig_log.debug("%s %s — no Asian candles found for today.", symbol, today)
             self._update_structure(symbol, "no_signal", "no Asian-range candles seeded for today")
