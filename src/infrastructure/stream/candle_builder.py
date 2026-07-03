@@ -95,7 +95,18 @@ class CandleBuilder:
             tf: [] for tf in TRACKED_TIMEFRAMES
         }
         self._max_cache: Dict[Timeframe, int] = {
-            Timeframe.M1:  120,   # 2 hours of M1 (enough for signal finders + gap)
+            # 780 (13h) BUG FIX: this project's EURUSDStrategyEngine needs to
+            # look back from as late as 12:59 UTC (near the end of the
+            # 10:00-13:00 breakout window) all the way to 02:00 UTC (Asian
+            # range start) — up to 11 hours, 660 M1 bars. The old value
+            # (120 = 2h, sized for Scraper-forex-bot's own M1 signal finders,
+            # which this project doesn't use) meant the ring buffer silently
+            # evicted the earliest Asian-range candles as the trading day
+            # progressed, so a range that was valid early in the breakout
+            # window disappeared later in the SAME session. Must match
+            # main_stream.py's _SEED_COUNTS[M1] and get_closed_candles(TF.M1, ...)
+            # call, or the extra history is discarded before reaching evaluate().
+            Timeframe.M1:  780,   # 13 hours of M1
             Timeframe.M5:  72,    # 6 hours of M5
             Timeframe.M30: 60,    # 30 hours of M30 (M30 story needs 8 bars of context)
             Timeframe.H1:  120,   # 5 days of H1

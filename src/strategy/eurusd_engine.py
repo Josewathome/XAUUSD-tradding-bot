@@ -124,12 +124,34 @@ class EURUSDStrategyEngine(IStrategyEngine):
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _maxlen_for(timeframe: Timeframe) -> int:
+        """
+        BUG THIS FIXES: the M1 buffer used to be a flat maxlen=512 (~8.5h)
+        regardless of timeframe. This strategy needs to look back from as
+        late as 12:59 UTC (near the end of the 10:00-13:00 breakout window)
+        all the way to 02:00 UTC (Asian range start) — up to 11 hours, 660
+        M1 candles. With only 512 slots, the ring buffer silently evicted
+        the EARLIEST Asian-range candles as the day progressed, so a range
+        that was valid early in the breakout window ("waiting for
+        breakout") would later disappear ("no Asian-range candles seeded
+        for today") within the SAME session, purely because the buffer
+        aged out data it still needed. M1 gets enough room for the full
+        Asian range + breakout window + margin; other timeframes keep the
+        original size (not used for anything that needs this much history).
+        """
+        return 780 if timeframe == Timeframe.M1 else 512
+
     def seed(self, symbol: str, timeframe: Timeframe, candles: List[Candle]) -> None:
-        self._candles.setdefault(symbol, {})[timeframe] = deque(candles, maxlen=512)
+        self._candles.setdefault(symbol, {})[timeframe] = deque(
+            candles, maxlen=self._maxlen_for(timeframe)
+        )
 
     def on_candle(self, candle: Candle) -> None:
         buf = self._candles.setdefault(candle.symbol, {})
-        buf.setdefault(candle.timeframe, deque(maxlen=512)).append(candle)
+        buf.setdefault(
+            candle.timeframe, deque(maxlen=self._maxlen_for(candle.timeframe))
+        ).append(candle)
 
     def push_tick(self, symbol: str, bid: float, ask: float, ts: float) -> None:
         self._ticks.setdefault(symbol, deque(maxlen=self._tick_buffer)).append((bid, ask, ts))

@@ -75,8 +75,16 @@ logger = logging.getLogger("main_stream")
 ZMQ_ENDPOINT = getattr(config, "ZMQ_ENDPOINT", "tcp://127.0.0.1:5556")
 
 # Seed only M1 and M5 — M5 retained for any strategy that needs higher-TF context.
+# M1=780 (13h) BUG FIX: EURUSDStrategyEngine's Asian-range logic needs to look
+# back from as late as 12:59 UTC (near the end of the 10:00-13:00 breakout
+# window) all the way to 02:00 UTC (Asian range start) — up to 11 hours, 660
+# M1 bars. The old value (120 = 2h) meant the range that was valid early in
+# the breakout window silently disappeared later in the SAME session as the
+# window slid past 02:00 UTC — this must match CandleBuilder._max_cache[M1]
+# and the get_closed_candles(TF.M1, ...) call below, or the extra history
+# is fetched/retained here but truncated back down before reaching evaluate().
 _SEED_COUNTS: Dict[Timeframe, int] = {
-    Timeframe.M1: 120,
+    Timeframe.M1: 780,
     Timeframe.M5: 55,   # EMA_SLOW=50 requires ≥50 bars
 }
 
@@ -622,7 +630,12 @@ def _run_strategy_evaluation(
     if builder is None:
         return
 
-    m1_candles = builder.get_closed_candles(TF.M1, 60)
+    # 780 (13h) matches _SEED_COUNTS[M1] and CandleBuilder._max_cache[M1] —
+    # see the _SEED_COUNTS comment above for why EURUSD's Asian-range logic
+    # needs this much M1 history. XAUUSDStrategyEngine.evaluate() never
+    # reads its m1_candles parameter at all, so this is a no-op size
+    # increase for XAUUSD — safe to share the same fetch across both.
+    m1_candles = builder.get_closed_candles(TF.M1, 780)
     m5_candles = builder.get_closed_candles(TF.M5, 55)
     forming_m1 = builder.get_forming_bar(TF.M1)
 
