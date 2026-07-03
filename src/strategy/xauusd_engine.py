@@ -51,10 +51,28 @@ _LONDON_OPEN_END    = 10
 _NY_OVERLAP_START   = 13
 _NY_OVERLAP_END     = 17
 
-# ── ATR regime thresholds (H1-proxy, USD price units) ──────────────────────
-_H1_ATR_MIN  = 1.5   # below: dead/Asian market — skip
-_H1_ATR_WARN = 4.5   # above: elevated (still trade, reduce confidence)
-_H1_ATR_MAX  = 5.5   # above: news/extreme regime — skip
+# ── ATR regime thresholds (H1-proxy, as a % of current price) ──────────────
+# BUG THIS FIXES: these used to be fixed USD amounts (1.5 / 4.5 / 5.5), which
+# only stay meaningful at whatever gold price they were calibrated against.
+# ATR is a price-level indicator — the same relative volatility produces a
+# larger dollar reading as the underlying price rises. Gold traded roughly
+# $2000-2700 when fixed thresholds this size were a sensible "dead market /
+# elevated / extreme" split; at today's ~$4185 (up ~25% YoY as of 2026-07),
+# the same genuinely normal volatility now produces a dollar ATR that
+# permanently exceeds the old $5.5 "extreme" ceiling, incorrectly blocking
+# entries in what is actually an ordinary trading regime for gold's current
+# price level. Expressing the bands as a % of price keeps them correctly
+# calibrated as gold's price moves, with no need to hand-tune the dollar
+# amounts every time gold makes a large multi-month move.
+#
+# Values below are the old thresholds ÷ ~$2400 (the rough midpoint of the
+# price range they were likely set against) — i.e. this preserves the
+# original strategy's intended volatility bands, just re-expressed so they
+# scale correctly going forward. Retune here if live behavior suggests these
+# percentages are still off for the current regime.
+_H1_ATR_MIN_PCT  = 0.000625   # 0.0625% — below: dead/Asian market — skip
+_H1_ATR_WARN_PCT = 0.001875   # 0.1875% — above: elevated (still trade, reduce confidence)
+_H1_ATR_MAX_PCT  = 0.0022917  # 0.22917% — above: news/extreme regime — skip
 
 # ── ATR expansion ratio (M5 7-period current / 20-period avg) ──────────────
 _AER_THRESHOLD = 1.1
@@ -86,7 +104,7 @@ _CONF_SESSION_PEAK = 0.10   # overlap vs open
 _CONF_VWAP_SD      = 0.15   # for |Z| ≥ 2.0
 _CONF_ATR_EXPAND   = 0.10
 _CONF_SWEEP_CLEAN  = 0.10   # bounce body ≥ 60% of candle range
-_CONF_ATR_ELEVATED = -0.10  # penalty: ATR > _H1_ATR_WARN
+_CONF_ATR_ELEVATED = -0.10  # penalty: ATR > _H1_ATR_WARN_PCT * price
 
 
 # ── Pure math helpers ────────────────────────────────────────────────────────
@@ -434,15 +452,26 @@ class XAUUSDStrategyEngine(IStrategyEngine):
             return None
 
         # ── GATE 2: ATR regime ─────────────────────────────────────────────
+        # Thresholds are % of current price (see _H1_ATR_*_PCT comment above)
+        # so the dead/elevated/extreme bands stay correctly calibrated as
+        # gold's price moves, instead of drifting stale like fixed USD amounts.
+        h1_atr_min  = _H1_ATR_MIN_PCT  * current_price
+        h1_atr_warn = _H1_ATR_WARN_PCT * current_price
+        h1_atr_max  = _H1_ATR_MAX_PCT  * current_price
+
         m5_atr7   = _atr(m5_candles, 7)
         h1_atr    = _h1_atr_proxy(m5_candles, n_h1_bars=6)
-        if h1_atr < _H1_ATR_MIN:
-            self._update_structure(symbol, "no_signal", f"ATR too low ({h1_atr:.2f})")
+        if h1_atr < h1_atr_min:
+            self._update_structure(
+                symbol, "no_signal", f"ATR too low ({h1_atr:.2f} < {h1_atr_min:.2f})"
+            )
             return None
-        if h1_atr > _H1_ATR_MAX:
-            self._update_structure(symbol, "no_signal", f"ATR extreme ({h1_atr:.2f})")
+        if h1_atr > h1_atr_max:
+            self._update_structure(
+                symbol, "no_signal", f"ATR extreme ({h1_atr:.2f} > {h1_atr_max:.2f})"
+            )
             return None
-        atr_elevated = h1_atr > _H1_ATR_WARN
+        atr_elevated = h1_atr > h1_atr_warn
 
         # ── GATE 3: Trend filter (EMA 20/50 on M5) ────────────────────────
         closes = [c.close for c in m5_candles]
