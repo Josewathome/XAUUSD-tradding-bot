@@ -13,7 +13,7 @@ import src.config as config
 from src.domain.entities import Candle, Timeframe
 from src.domain.repositories import IMarketDataRepository
 from src.domain.value_objects import PipCalculator, pip_value_per_lot
-from src.infrastructure.mt5_bridge.mt5_gateway import MT5Gateway
+from src.infrastructure.mt5_bridge.mt5_gateway import MT5Gateway, kernel_epoch_now
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,13 @@ class BrokerClock:
             ts = None
 
         if ts is not None:
-            wall_now  = _time.time()
+            # kernel_epoch_now(), not time.time() — see its docstring: this
+            # process's own time.time() has been confirmed to read hours
+            # wrong for extended periods right after startup, which would
+            # otherwise misjudge a genuinely fresh MT5 tick as stale (or a
+            # stale one as fresh) purely because of the freshness *check*,
+            # not the tick itself.
+            wall_now  = kernel_epoch_now()
             tick_age  = wall_now - ts
             if tick_age <= self._MAX_TICK_AGE:
                 self._cached_broker_ts = float(ts)
@@ -138,7 +144,10 @@ class BrokerClock:
             "falling back to the HOST CLOCK. Trading decisions made right now "
             "are NOT using MT5 time. Check the MT5 connection."
         )
-        return datetime.now(tz=timezone.utc)
+        # kernel_epoch_now(), not datetime.now() — even in this fallback
+        # path, a filesystem-mtime-derived time is more trustworthy than
+        # this process's own time.time() (see kernel_epoch_now's docstring).
+        return datetime.fromtimestamp(kernel_epoch_now(), tz=timezone.utc)
 
     def invalidate(self) -> None:
         """Force the next now() call to re-fetch from MT5 instead of using the cache."""
