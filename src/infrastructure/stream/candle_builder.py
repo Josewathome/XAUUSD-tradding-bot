@@ -212,16 +212,26 @@ class CandleBuilder:
         missed (e.g., during a brief connection blip). This method merges
         the EA-reported bar with the locally-built one:
           - If the EA's bar is newer than the last closed bar: accept it.
-          - Otherwise: discard (duplicate from reconnect).
+          - Otherwise: discard (duplicate — the common case, since the
+            tick-built bar usually closes first).
 
         This is the "hybrid trust" approach: tick-built candles are
         preferred for real-time accuracy; EA-pushed candles serve as a
         correction layer for missed ticks.
-        """
-        closed = self._closed[timeframe]
-        if closed and closed[-1].time.timestamp() >= bar_time:
-            return  # already have this bar (or a newer one) — discard
 
+        BUG THIS FIXES: the duplicate check used to compare `bar_time` (raw
+        MT5 epoch, uncorrected) against `closed[-1].time.timestamp()`
+        (offset-corrected, via mt5_epoch_to_datetime) — two different time
+        bases, so the check was never true and every EA bar (duplicate or
+        not) fell through to _store_closed(), which caught the duplicate
+        correctly but only AFTER this method had already unconditionally
+        fired _on_close() below, re-queuing a second CANDLE_CLOSED event for
+        a bar the tick-built path had already emitted. That's what caused
+        every M1 close to run strategy evaluation multiple times. Building
+        the candle (and its corrected timestamp) first and comparing
+        like-for-like fixes both the false-negative duplicate detection and
+        the double-evaluation it caused.
+        """
         candle = Candle(
             time=      mt5_epoch_to_datetime(bar_time),
             open=      open_p,
@@ -232,6 +242,13 @@ class CandleBuilder:
             symbol=    self._symbol,
             timeframe= timeframe,
         )
+        closed = self._closed[timeframe]
+        if closed and candle.time <= closed[-1].time:
+            logger.debug(
+                "CandleBuilder[%s/%s] EA bar_close is a duplicate of the "
+                "tick-built bar — discarding.", self._symbol, timeframe.value,
+            )
+            return
         self._store_closed(timeframe, candle)
         if self._on_close:
             self._on_close(candle)

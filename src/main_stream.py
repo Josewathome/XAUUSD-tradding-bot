@@ -525,25 +525,20 @@ def run_stream() -> None:
                     logger.debug("Strategy tick push [%s]: %s", sym, exc)
 
         # ── CANDLE_CLOSED ──────────────────────────────────────────────
-        elif etype in ("CANDLE_CLOSED", "BAR_CLOSE"):
-            if etype == "CANDLE_CLOSED":
-                candle = event.get("candle")
-                if candle is None:
-                    continue
-                sym = candle.symbol
-                tf  = candle.timeframe
-                try:
-                    strategy.on_candle(candle)
-                except Exception as exc:
-                    logger.debug("Strategy on_candle [%s/%s]: %s", sym, tf.value, exc)
-            else:
-                sym = event.get("sym", "")
-                tf_s = event.get("tf", "")
-                tf_map = {"M1": Timeframe.M1, "M5": Timeframe.M5, "M30": Timeframe.M30,
-                          "H1": Timeframe.H1, "H4": Timeframe.H4}
-                tf = tf_map.get(tf_s)
-                if tf is None:
-                    continue
+        # Sole source for candle-close events: CandleBuilder's _on_close
+        # callback, fired exactly once per bar (either from the tick-driven
+        # finalizer, or from the EA's BAR_CLOSE correction path when it's
+        # genuinely a new bar — see CandleBuilder.on_bar_close_from_ea).
+        elif etype == "CANDLE_CLOSED":
+            candle = event.get("candle")
+            if candle is None:
+                continue
+            sym = candle.symbol
+            tf  = candle.timeframe
+            try:
+                strategy.on_candle(candle)
+            except Exception as exc:
+                logger.debug("Strategy on_candle [%s/%s]: %s", sym, tf.value, exc)
 
             if sym not in config.SYMBOLS:
                 continue
