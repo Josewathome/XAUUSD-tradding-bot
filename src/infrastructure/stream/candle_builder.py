@@ -219,18 +219,11 @@ class CandleBuilder:
         preferred for real-time accuracy; EA-pushed candles serve as a
         correction layer for missed ticks.
 
-        BUG THIS FIXES: the duplicate check used to compare `bar_time` (raw
-        MT5 epoch, uncorrected) against `closed[-1].time.timestamp()`
-        (offset-corrected, via mt5_epoch_to_datetime) — two different time
-        bases, so the check was never true and every EA bar (duplicate or
-        not) fell through to _store_closed(), which caught the duplicate
-        correctly but only AFTER this method had already unconditionally
-        fired _on_close() below, re-queuing a second CANDLE_CLOSED event for
-        a bar the tick-built path had already emitted. That's what caused
-        every M1 close to run strategy evaluation multiple times. Building
-        the candle (and its corrected timestamp) first and comparing
-        like-for-like fixes both the false-negative duplicate detection and
-        the double-evaluation it caused.
+        Relies entirely on _store_closed()'s own duplicate check (comparing
+        already-corrected Candle.time values) and its return value to
+        decide whether to fire _on_close — see _store_closed's docstring
+        for why firing it unconditionally used to cause every M1 close to
+        run strategy evaluation multiple times.
         """
         candle = Candle(
             time=      mt5_epoch_to_datetime(bar_time),
@@ -242,15 +235,7 @@ class CandleBuilder:
             symbol=    self._symbol,
             timeframe= timeframe,
         )
-        closed = self._closed[timeframe]
-        if closed and candle.time <= closed[-1].time:
-            logger.debug(
-                "CandleBuilder[%s/%s] EA bar_close is a duplicate of the "
-                "tick-built bar — discarding.", self._symbol, timeframe.value,
-            )
-            return
-        self._store_closed(timeframe, candle)
-        if self._on_close:
+        if self._store_closed(timeframe, candle) and self._on_close:
             self._on_close(candle)
 
     def get_closed_candles(self, timeframe: Timeframe, count: int) -> List[Candle]:
@@ -299,31 +284,50 @@ class CandleBuilder:
             symbol=    self._symbol,
             timeframe= tf,
         )
-        self._store_closed(tf, candle)
-        logger.debug(
-            "CandleBuilder[%s/%s] bar closed | O=%.5f H=%.5f L=%.5f C=%.5f ticks=%d",
-            self._symbol, tf.value,
-            candle.open, candle.high, candle.low, candle.close, forming.tick_vol,
-        )
-        if self._on_close:
+        stored = self._store_closed(tf, candle)
+        if stored:
+            logger.debug(
+                "CandleBuilder[%s/%s] bar closed | O=%.5f H=%.5f L=%.5f C=%.5f ticks=%d",
+                self._symbol, tf.value,
+                candle.open, candle.high, candle.low, candle.close, forming.tick_vol,
+            )
+        if stored and self._on_close:
             self._on_close(candle)
 
-    def _store_closed(self, tf: Timeframe, candle: Candle) -> None:
-        # Defense in depth: consumers (e.g. EURUSDStrategyEngine's Asian-range
-        # scan) rely on this cache being strictly chronological with the
-        # newest candle at the end. on_tick()'s monotonic guard is the primary
-        # fix for the out-of-order-tick bug this addresses, but a second bad
-        # candle from any current or future caller shouldn't be able to
-        # silently corrupt this invariant again.
+    def _store_closed(self, tf: Timeframe, candle: Candle) -> bool:
+        """
+        Append `candle` to the closed-candle cache if it's genuinely newer
+        than what's already there; return whether it was stored.
+
+        This is the single arbiter both _finalise_bar() (tick-driven close)
+        and on_bar_close_from_ea() (EA-reported close) go through — whichever
+        of the two independently detects a given bar boundary first "wins"
+        and gets stored; the other's candle for the same bar_open is a
+        duplicate by design (both mechanisms observe the same underlying
+        market data) and must be discarded here, with its _on_close NOT
+        fired — callers gate their own _on_close call on this return value
+        for exactly that reason. Without that gating, both mechanisms racing
+        on every single bar close, not just occasionally, used to fire two
+        (sometimes three, counting a raw passthrough event since removed)
+        CANDLE_CLOSED events per real bar, running strategy evaluation
+        multiple times per close.
+
+        Also serves as defense in depth for the cache's chronological-order
+        invariant that EURUSDStrategyEngine's Asian-range scan relies on:
+        on_tick()'s monotonic guard is the primary fix for the out-of-order-
+        tick bug this addresses, but a bad candle from any other caller
+        shouldn't be able to silently corrupt this invariant either.
+        """
         cache = self._closed[tf]
         if cache and candle.time <= cache[-1].time:
-            logger.warning(
-                "CandleBuilder[%s/%s] discarded out-of-order candle "
+            logger.debug(
+                "CandleBuilder[%s/%s] discarded duplicate/out-of-order candle "
                 "(candle.time=%s <= last.time=%s)",
                 self._symbol, tf.value, candle.time, cache[-1].time,
             )
-            return
+            return False
         max_size = self._max_cache[tf]
         cache.append(candle)
         if len(cache) > max_size:
             del cache[0]
+        return True
