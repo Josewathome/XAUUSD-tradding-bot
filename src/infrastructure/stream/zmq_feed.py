@@ -203,12 +203,24 @@ class ZmqFeed:
         self._q.put({"type": "TICK", "sym": sym, "bid": bid, "ask": ask, "time": t})
 
     def _handle_bar_close(self, data: dict) -> None:
-        # No separate "BAR_CLOSE" queue event here — on_bar_close_from_ea()
-        # already re-queues a CANDLE_CLOSED event via the builder's _on_close
-        # callback whenever the EA's bar is genuinely new (not a duplicate of
-        # the tick-built one). A second, unconditional queue-put of this raw
-        # EA message used to fire alongside it, so a single M1 close could
-        # trigger main_stream.py's strategy-evaluation block 2-3 times.
+        # No separate "BAR_CLOSE" queue event here. This mirrors Scraper-forex-bot
+        # and New-forex-bot's original design, which queued this raw EA message
+        # AND called on_bar_close_from_ea() for every BAR_CLOSE — both fed the
+        # same main_stream.py block that runs strategy evaluation, so one EA
+        # message could trigger it twice on its own, on top of the tick-built
+        # path triggering it a third time (all three sibling bots have this).
+        #
+        # Confirmed the raw event added nothing on_bar_close_from_ea() doesn't
+        # already cover: the one place its sibling CANDLE_CLOSED events forward
+        # a Candle that a raw BAR_CLOSE event never did — strategy.on_candle()
+        # populating each engine's self._candles buffer — that buffer is written
+        # but never read anywhere (evaluate() takes m1_candles/m5_candles as
+        # explicit args sourced from CandleBuilder's own cache instead), so
+        # skipping it changes nothing observable. on_bar_close_from_ea() already
+        # re-queues a CANDLE_CLOSED event via the builder's _on_close callback
+        # whenever the EA's bar is genuinely new (not a duplicate of the
+        # tick-built one) — that's the real "EA report as a fallback for missed
+        # ticks" path, and it's untouched here.
         sym  = data.get("sym", "")
         tf_s = data.get("tf", "")
         tf   = _TF_MAP.get(tf_s)
