@@ -4,7 +4,6 @@ Pure MT5 API wrapper. Returns plain dicts. Zero business logic.
 """
 from __future__ import annotations
 import logging
-import tempfile
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -31,28 +30,6 @@ try:
 except ImportError as e:
     print("IMPORT ERROR:", e)
     MT5_AVAILABLE = False
-
-
-def kernel_epoch_now() -> float:
-    """
-    Return "now" as a Unix epoch float, sourced from the filesystem's own
-    mtime metadata rather than time.time()/datetime.now().
-
-    WHY: confirmed live that this process's own time.time() can read
-    several hours behind true wall-clock for extended periods (seen up to
-    ~10+ minutes) right after startup — a Wine clock-sync quirk isolated to
-    time-of-day queries specifically (GetSystemTimeAsFileTime-style calls).
-    File mtimes go through a different Wine code path (a straight
-    passthrough of the real stat() syscall result from the underlying
-    Linux kernel, not a computed "what time is it right now"), so they
-    don't exhibit the same lag. Used anywhere a wrong one-time reading
-    would get locked in for an extended period (see detect_utc_offset).
-    """
-    path = os.path.join(tempfile.gettempdir(), "_zonebot_clock_probe")
-    with open(path, "w") as fh:
-        fh.write("x")
-    return os.path.getmtime(path)
-
 
 def _mt5_log_has_invalid_account() -> bool:
     """
@@ -358,22 +335,25 @@ class MT5Gateway:
         market closed), so callers should keep the config default as a
         manual fallback for those cases.
 
-        Uses kernel_epoch_now() instead of time.time()/datetime.now() for
-        "real UTC" — see that function's docstring. This process's own
-        time.time() has been confirmed live to read several hours behind
-        true wall-clock for extended periods (seen up to 10+ minutes)
-        right after startup, apparently a Wine clock-sync quirk. Since this
-        offset is detected once and applied statically for the entire
-        session, a single bad reading during that window would corrupt
-        every session-window / news-blocking decision until the next
-        restart — kernel_epoch_now() sidesteps the issue by never calling
-        time.time() at all.
+        Takes several samples a couple seconds apart and requires two
+        consecutive samples to agree before trusting the result, instead of
+        trusting a single point-in-time reading.
 
-        Also takes up to a few samples, a couple seconds apart, and
-        requires two consecutive samples to agree before trusting the
-        result — defense in depth in case the very first tick right after
-        connect is itself momentarily unsettled for unrelated reasons.
+        WHY: confirmed live that immediately after this process starts
+        (right after MT5 connects, freshly under Wine), `time.time()` can
+        read several hours behind true wall-clock for roughly the first
+        minute before self-correcting — a transient Wine clock-sync quirk,
+        not a real timezone difference. A single sample taken during that
+        window silently mismeasures the broker offset (the process's own
+        `real_utc` reading is what's wrong, not the broker), and since this
+        offset is detected once and applied statically for the whole
+        session, one bad sample would corrupt every session-window /
+        news-blocking decision until the next restart. Requiring two
+        consecutive agreeing samples catches this: a genuine broker offset
+        stays constant a couple seconds apart, while a mid-self-correction
+        clock reads differently each time.
         """
+        import time as _time
         if not self._ensure_ready():
             return 0
 
@@ -387,7 +367,7 @@ class MT5Gateway:
                 logger.warning("detect_utc_offset: no EURUSD tick — defaulting to 0")
                 return 0
             server_ts   = int(tick.time)
-            real_utc    = int(kernel_epoch_now())
+            real_utc    = int(_time.time())
             age_seconds = real_utc - server_ts
             if age_seconds > 600:
                 # Tick older than 10 min → market closed, timestamp stale and unreliable
@@ -411,12 +391,13 @@ class MT5Gateway:
             if prev_offset is not None:
                 logger.warning(
                     "detect_utc_offset: unstable reading (sample %d: UTC%+d, "
-                    "previous: UTC%+d) — re-sampling.",
+                    "previous: UTC%+d) — process clock may still be settling "
+                    "after startup; re-sampling.",
                     attempt, offset, prev_offset,
                 )
             prev_offset = offset
             if attempt < _MAX_ATTEMPTS:
-                time.sleep(_SAMPLE_GAP_SEC)
+                _time.sleep(_SAMPLE_GAP_SEC)
 
         logger.warning(
             "detect_utc_offset: readings never stabilized after %d attempts — "
