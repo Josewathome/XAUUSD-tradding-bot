@@ -42,7 +42,13 @@ string   g_bar_keys[];
 datetime g_bar_last_open[];
 int      g_bar_count = 0;
 
-datetime g_last_tick_time = 0;
+ulong    g_last_tick_ms   = 0;   // GetTickCount64()-based — gates the heartbeat interval below.
+                                  // TimeCurrent() freezes whenever no new quotes arrive (market
+                                  // closed / weekend / thin liquidity), which used to silently
+                                  // stop the heartbeat entirely for the whole quiet period and
+                                  // made the Python-side watchdog think the EA had died. This is
+                                  // a wall-clock-independent millisecond counter that always
+                                  // advances, so the heartbeat keeps firing regardless of ticks.
 
 bool _OpenFeedFile()
 {
@@ -111,7 +117,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(g_file == INVALID_HANDLE) { _OpenFeedFile(); return; }
-   g_last_tick_time = TimeCurrent();
+   g_last_tick_ms = GetTickCount64();
 
    string tfs[5]; tfs[0]="M1"; tfs[1]="M5"; tfs[2]="M30"; tfs[3]="H1"; tfs[4]="H4";
    ENUM_TIMEFRAMES tf_enum[5];
@@ -160,11 +166,13 @@ void OnTick()
 void OnTimer()
 {
    if(g_file == INVALID_HANDLE) { _OpenFeedFile(); return; }
-   datetime now = TimeCurrent();
-   if(now - g_last_tick_time >= HEARTBEAT_SECS)
+   // Gate on GetTickCount64() (always advances), not TimeCurrent() (freezes
+   // when no new quotes arrive) — see g_last_tick_ms declaration above.
+   ulong now_ms = GetTickCount64();
+   if(now_ms - g_last_tick_ms >= (ulong)HEARTBEAT_SECS * 1000)
    {
-      _Send(StringFormat("HEARTBEAT {\"time\":%d}", (int)now));
-      g_last_tick_time = now;
+      _Send(StringFormat("HEARTBEAT {\"time\":%d}", (int)TimeCurrent()));
+      g_last_tick_ms = now_ms;
    }
 }
 

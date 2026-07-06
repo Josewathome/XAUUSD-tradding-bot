@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 from src.domain.entities import Candle, Timeframe
+from src.infrastructure.market_data_repo import mt5_epoch_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +223,7 @@ class CandleBuilder:
             return  # already have this bar (or a newer one) — discard
 
         candle = Candle(
-            time=      datetime.fromtimestamp(bar_time, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(bar_time),
             open=      open_p,
             high=      high_p,
             low=       low_p,
@@ -258,7 +258,7 @@ class CandleBuilder:
         if forming is None:
             return None
         return Candle(
-            time=      datetime.fromtimestamp(forming.bar_open, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(forming.bar_open),
             open=      forming.open,
             high=      forming.high,
             low=       forming.low,
@@ -273,7 +273,7 @@ class CandleBuilder:
     def _finalise_bar(self, tf: Timeframe, forming: _FormingBar) -> None:
         """Convert a forming bar to a closed Candle, store it, and fire callback."""
         candle = Candle(
-            time=      datetime.fromtimestamp(forming.bar_open, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(forming.bar_open),
             open=      forming.open,
             high=      forming.high,
             low=       forming.low,

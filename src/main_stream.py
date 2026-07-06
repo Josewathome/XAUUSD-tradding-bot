@@ -96,24 +96,17 @@ _SEED_COUNTS: Dict[Timeframe, int] = {
 # Until then, the placeholders run the full framework in observation mode: the
 # engine emits no signals and the guardian issues no exit decisions.
 
-def build_engine(symbols, broker_utc_offset_hours: int = 0) -> IStrategyEngine:
-    # broker_utc_offset_hours is live-detected per connection (see
-    # gw.detect_utc_offset() below) and passed straight through to the
-    # engines, which need it to convert candle.time (broker-server clock)
-    # into real UTC before any session/time-window gate. This means the
-    # offset adapts automatically if the bot is ever pointed at a different
-    # broker/server — nothing here is hardcoded to one broker's offset.
+def build_engine(symbols) -> IStrategyEngine:
+    # Engines read candle.time directly — it arrives already offset-corrected
+    # by market_data_repo.mt5_epoch_to_datetime, so no offset is threaded
+    # through here.
     xau_syms = [s for s in symbols if s == "XAUUSD"]
     eur_syms = [s for s in symbols if s == "EURUSD"]
     engines = {}
     if xau_syms:
-        engines["XAUUSD"] = XAUUSDStrategyEngine(
-            symbols=xau_syms, broker_utc_offset_hours=broker_utc_offset_hours,
-        )
+        engines["XAUUSD"] = XAUUSDStrategyEngine(symbols=xau_syms)
     if eur_syms:
-        engines["EURUSD"] = EURUSDStrategyEngine(
-            symbols=eur_syms, broker_utc_offset_hours=broker_utc_offset_hours,
-        )
+        engines["EURUSD"] = EURUSDStrategyEngine(symbols=eur_syms)
     return MultiSymbolEngine(engines)
 
 
@@ -265,17 +258,24 @@ def _seed_builders(
 def run_stream() -> None:
     gw = connect_mt5()
 
-    clock     = BrokerClock(gw)   # TrueTimeClock NTP-calibrated inside
-    true_now  = clock.now()
-    logger.info("True UTC at startup (NTP): %s", true_now.strftime("%Y-%m-%dT%H:%M:%S"))
-
+    # Calibrate the broker-to-real-world-hour offset ONCE, here, before
+    # anything reads MT5 time. This is the only place the host clock is
+    # read at all (detect_utc_offset() compares one MT5 tick against
+    # time.time() to measure the offset) — the result is a static constant
+    # (config.BROKER_UTC_OFFSET_HOURS) that market_data_repo.mt5_epoch_to_datetime
+    # applies to every MT5 timestamp from here on. The host clock is never
+    # consulted again after this one measurement.
     _detected_offset = gw.detect_utc_offset()
     if _detected_offset != 0:
         config.BROKER_UTC_OFFSET_HOURS = _detected_offset
     logger.info(
-        "Broker UTC offset: UTC%+d (detected=%+d)",
+        "MT5-to-real-world-hour offset: UTC%+d (detected=%+d, applied once at startup)",
         config.BROKER_UTC_OFFSET_HOURS, _detected_offset,
     )
+
+    clock   = BrokerClock(gw)   # MT5 server time, offset-corrected — no NTP, no host clock
+    bot_now = clock.now()
+    logger.info("Bot time at startup (MT5-derived): %s", bot_now.strftime("%Y-%m-%dT%H:%M:%S"))
 
     acc = gw.get_account_info()
     if acc:
@@ -299,13 +299,7 @@ def run_stream() -> None:
     _seed_builders(builders, mt5_market_data)
 
     # ── Strategy engine (injected via build_engine) ───────────────────
-    # Pass the live-detected broker offset so session/time-window gates in
-    # the engines convert candle.time (broker-server clock) to real UTC
-    # correctly — see build_engine()'s docstring comment for why this
-    # matters and how it adapts to a different broker/server automatically.
-    strategy: IStrategyEngine = build_engine(
-        config.SYMBOLS, broker_utc_offset_hours=config.BROKER_UTC_OFFSET_HOURS,
-    )
+    strategy: IStrategyEngine = build_engine(config.SYMBOLS)
     logger.info("Seeding strategy engine with historical candles...")
     _strategy_seed_counts = {
         Timeframe.M5:  55,   # EMA_SLOW=50 requires ≥50 bars; 55 gives a small buffer
@@ -362,7 +356,6 @@ def run_stream() -> None:
         min_rr=            config.MIN_RR,
         account_currency=  config.ACCOUNT_CURRENCY,
         journal=           TradeJournal(),
-        clock=             clock,
         guardian=          build_guardian(),
     )
 
@@ -372,7 +365,7 @@ def run_stream() -> None:
     cleanup    = CleanupService()
     checkpoint = CheckpointService(getattr(config, "CHECKPOINT_DIR", ".checkpoints"))
     email_svc  = EmailService()
-    scheduler  = Scheduler()
+    scheduler  = Scheduler(clock=clock)
 
     # ── Restore checkpoint ─────────────────────────────────────────────
     # IMPORTANT: restore entry_gate's daily drawdown baseline BEFORE calling
@@ -393,12 +386,12 @@ def run_stream() -> None:
         eg_state = cp.get("entry_gate_state")
         if eg_state:
             try:
-                entry_gate.load_runtime_state(eg_state)
+                entry_gate.load_runtime_state(eg_state, now=clock.now())
             except Exception as exc:
                 logger.warning("EntryGate state restore failed: %s", exc)
 
     _startup_balance = (gw.get_account_info() or {}).get("balance", 0.0)
-    entry_gate.on_new_day(_startup_balance)
+    entry_gate.on_new_day(_startup_balance, now=clock.now())
 
     # ── Dashboard ──────────────────────────────────────────────────────
     try:
@@ -432,17 +425,17 @@ def run_stream() -> None:
         for _hr in range(24):
             scheduler.add_daily(
                 f"tick_analytics_hourly_{_hr:02d}",
-                lambda _now=None, _a=_tick_analytics: _a.run_hourly(_now or datetime.now(tz=timezone.utc)),
+                lambda _a=_tick_analytics, _clk=clock: _a.run_hourly(_clk.now()),
                 hour=_hr,
             )
         scheduler.add_daily(
             "tick_analytics_daily",
-            lambda _now=None, _a=_tick_analytics: _a.run_daily(_now or datetime.now(tz=timezone.utc)),
+            lambda _a=_tick_analytics, _clk=clock: _a.run_daily(_clk.now()),
             hour=22,
         )
         scheduler.add_weekly(
             "tick_analytics_weekly",
-            lambda _now=None, _a=_tick_analytics: _a.run_weekly(_now or datetime.now(tz=timezone.utc)),
+            lambda _a=_tick_analytics, _clk=clock: _a.run_weekly(_clk.now()),
             weekday=4,
             hour=21,
         )
@@ -518,7 +511,7 @@ def run_stream() -> None:
             sym = event.get("sym", "")
             if sym in config.SYMBOLS:
                 try:
-                    execution.run_monitoring_only(sym)
+                    execution.run_monitoring_only(sym, now)
                 except Exception as exc:
                     logger.exception("Monitoring [%s]: %s", sym, exc)
                 try:
@@ -578,19 +571,19 @@ def run_stream() -> None:
             )
             if sym in config.SYMBOLS:
                 try:
-                    execution.run_monitoring_only(sym)
+                    execution.run_monitoring_only(sym, now)
                 except Exception as exc:
                     logger.exception("Post-trade monitoring [%s]: %s", sym, exc)
 
         elif etype == "HEARTBEAT":
             _hb_ts = event.get("time", 0)
             try:
-                from datetime import datetime, timezone as _tz
-                _hb_utc = datetime.fromtimestamp(_hb_ts, tz=_tz.utc)
+                from src.infrastructure.market_data_repo import mt5_epoch_to_datetime as _to_bot_time
+                _hb_bot_time = _to_bot_time(_hb_ts)
                 logger.info(
-                    "Heartbeat | broker_utc=%s | local_utc=%s",
-                    _hb_utc.strftime("%Y-%m-%dT%H:%M:%S"),
-                    datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "Heartbeat | bot_time(MT5, offset-corrected)=%s | host_clock(diagnostic only)=%s",
+                    _hb_bot_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
                 )
             except Exception:
                 logger.debug("Heartbeat: broker_time=%s", _hb_ts)
@@ -630,6 +623,13 @@ def _run_strategy_evaluation(
     if builder is None:
         return
 
+    if now is None:
+        logger.error(
+            "_run_strategy_evaluation [%s] called without `now` — refusing to fall back "
+            "to the host clock; skipping this evaluation cycle.", symbol,
+        )
+        return
+
     # 780 (13h) matches _SEED_COUNTS[M1] and CandleBuilder._max_cache[M1] —
     # see the _SEED_COUNTS comment above for why EURUSD's Asian-range logic
     # needs this much M1 history. XAUUSDStrategyEngine.evaluate() never
@@ -643,10 +643,7 @@ def _run_strategy_evaluation(
         return
 
     if forming_m1 is not None:
-        try:
-            elapsed = max(0.0, min(60.0, (stream_repo.now() - forming_m1.time).total_seconds()))
-        except Exception:
-            elapsed = 30.0
+        elapsed = max(0.0, min(60.0, (now - forming_m1.time).total_seconds()))
     else:
         elapsed = 30.0
 
@@ -668,7 +665,6 @@ def _run_strategy_evaluation(
     # Called unconditionally — signal=None is valid input (means "no setup").
     if entry_gate is not None:
         _structure = strategy.get_structure(symbol)
-        _eval_now  = now or datetime.now(tz=timezone.utc)
         try:
             entry_gate._exec.run_trade_revaluation(
                 symbol=symbol,
@@ -676,7 +672,7 @@ def _run_strategy_evaluation(
                 structure=_structure,
                 m1_candles=m1_candles,
                 m5_candles=m5_candles,
-                now=_eval_now,
+                now=now,
             )
         except Exception as exc:
             logger.exception("Trade revaluation [%s]: %s", symbol, exc)
@@ -706,18 +702,12 @@ def _run_strategy_evaluation(
     if entry_gate is None or not getattr(config, "STRATEGY_GATE_ENABLED", False):
         return
 
-    eval_now = now or datetime.now(tz=timezone.utc)
-
-    # Always use UTC date — eval_now may be broker-local time (UTC+offset)
-    try:
-        today = eval_now.astimezone(timezone.utc).date().isoformat()
-    except (AttributeError, TypeError):
-        today = eval_now.date().isoformat()
+    today = now.date().isoformat()
     if _last_gate_day.get(symbol) != today:
         _last_gate_day[symbol] = today
         try:
             bal = (gw.get_account_info() or {}).get("balance", 0.0) if gw else 0.0
-            entry_gate.on_new_day(bal)
+            entry_gate.on_new_day(bal, now=now)
         except Exception:
             pass
 
@@ -751,7 +741,7 @@ def _run_strategy_evaluation(
     candidate = entry_gate.evaluate(
         signal=        signal,
         current_price= current_price,
-        now=           eval_now,
+        now=           now,
         balance=       balance,
         pip_calc=      pip_calc,
         pip_value=     pip_value,
@@ -764,10 +754,10 @@ def _run_strategy_evaluation(
 
     exec_svc = entry_gate._exec
     try:
-        trade = exec_svc.execute_entry_candidate(candidate)
+        trade = exec_svc.execute_entry_candidate(candidate, now)
         if trade:
-            entry_gate.record_trade()
-            entry_gate.record_fill(symbol, signal.direction)
+            entry_gate.record_trade(now=now)
+            entry_gate.record_fill(symbol, signal.direction, now=now)
             if getattr(candidate, "_exploration", False):
                 entry_gate.record_exploration(symbol)
             logger.info(
@@ -780,7 +770,7 @@ def _run_strategy_evaluation(
                 trade.entry_price,
                 trade.stop_loss,
                 trade.take_profit,
-                entry_gate.daily_trade_count(),
+                entry_gate.daily_trade_count(now=now),
             )
     except Exception as exc:
         logger.exception("Strategy trade execution [%s]: %s", symbol, exc)

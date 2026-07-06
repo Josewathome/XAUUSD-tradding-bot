@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, Optional
 
 import src.config as config
@@ -99,8 +99,8 @@ class EntryGate:
 
     # ── Public API ─────────────────────────────────────────────────
 
-    def on_new_day(self, balance: float) -> None:
-        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    def on_new_day(self, balance: float, now: datetime) -> None:
+        today_utc = now.date().isoformat()
         if self._last_new_day_utc == today_utc:
             return
         self._last_new_day_utc = today_utc
@@ -118,7 +118,7 @@ class EntryGate:
             "last_new_day_utc":     self._last_new_day_utc,
         }
 
-    def load_runtime_state(self, state: Dict) -> None:
+    def load_runtime_state(self, state: Dict, now: datetime) -> None:
         """
         Restore the daily drawdown baseline from a checkpoint — call this
         BEFORE the startup on_new_day(balance) call.
@@ -132,11 +132,12 @@ class EntryGate:
         of what it had already lost that day, silently defeating the daily
         cap across a restart.
 
-        Only restores if the checkpoint is from TODAY (UTC) — a checkpoint
-        from a previous day must NOT seed a stale baseline; on_new_day()'s
-        own day-change check will correctly re-baseline fresh in that case.
+        Only restores if the checkpoint is from TODAY (bot time, MT5-derived)
+        — a checkpoint from a previous day must NOT seed a stale baseline;
+        on_new_day()'s own day-change check will correctly re-baseline fresh
+        in that case.
         """
-        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+        today_utc = now.date().isoformat()
         saved_day = state.get("last_new_day_utc")
         if saved_day == today_utc and state.get("session_start_equity") is not None:
             self._session_start_equity = state["session_start_equity"]
@@ -147,15 +148,15 @@ class EntryGate:
                 self._session_start_equity,
             )
 
-    def record_trade(self) -> None:
-        today = datetime.now(tz=timezone.utc).date().isoformat()
+    def record_trade(self, now: datetime) -> None:
+        today = now.date().isoformat()
         self._daily_counts[today] = self._daily_counts.get(today, 0) + 1
 
-    def record_fill(self, symbol: str, direction: Direction) -> None:
-        self._last_fill.setdefault(symbol, {})[direction.value] = datetime.now(tz=timezone.utc)
+    def record_fill(self, symbol: str, direction: Direction, now: datetime) -> None:
+        self._last_fill.setdefault(symbol, {})[direction.value] = now
 
-    def daily_trade_count(self) -> int:
-        today = datetime.now(tz=timezone.utc).date().isoformat()
+    def daily_trade_count(self, now: datetime) -> int:
+        today = now.date().isoformat()
         return self._daily_counts.get(today, 0)
 
     def evaluate(
@@ -401,7 +402,7 @@ class EntryGate:
             grade, risk_pct, current_price, sl_price, tp1_price, tp2_price,
             sl_dist_pips, eff_rr,
             "EXPLORATION" if is_exploration else "EV_OK",
-            self.daily_trade_count(),
+            self.daily_trade_count(now=now),
         )
         return candidate
 

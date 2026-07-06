@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timezone, date
 from typing import Deque, Dict, List, Optional, Tuple
 
 from src.domain.entities import Candle, Direction, Timeframe
@@ -51,42 +51,33 @@ _TP2_RR     = 2.0
 _BE_BUFFER  = 1.0 * _PIP  # breakeven buffer after TP1
 
 
-def _utc_hour(dt: datetime, offset_hours: int = 0) -> int:
+def _utc_hour(dt: datetime) -> int:
     """
-    Real-UTC hour of a candle timestamp.
+    Hour-of-day of a candle timestamp.
 
-    BUG THIS FIXES: candle.time is stamped in the BROKER SERVER's clock
-    (MQL5 iTime()), not real UTC. The old version of this function assumed a
-    naive datetime was already UTC, so the Asian-range window and breakout
-    window below silently evaluated the wrong real-world hours, shifted by
-    the broker's offset (confirmed live: +3h for this broker).
-
-    offset_hours is the broker's live-detected offset from real UTC
-    (config.BROKER_UTC_OFFSET_HOURS — re-detected on every connect, so this
-    adapts automatically if the bot is ever pointed at a different
-    broker/server with a different offset). Pass 0 only for timestamps that
-    are already real UTC.
+    candle.time is already MT5 server time, offset-corrected to align with
+    real-world session hours (see market_data_repo.mt5_epoch_to_datetime —
+    every Candle is stamped through it before it reaches this engine). This
+    function no longer applies any correction itself; it just reads the hour
+    off an already-correct, tz-aware timestamp.
     """
-    naive_hour = dt.hour if dt.tzinfo is None else dt.astimezone(timezone.utc).hour
-    return (naive_hour - offset_hours) % 24
+    return dt.hour if dt.tzinfo is None else dt.astimezone(timezone.utc).hour
 
 
-def _utc_date(dt: datetime, offset_hours: int = 0) -> date:
-    """Real-UTC calendar date of a candle timestamp — see _utc_hour."""
-    naive = dt if dt.tzinfo is None else dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return (naive - timedelta(hours=offset_hours)).date()
+def _utc_date(dt: datetime) -> date:
+    """Calendar date of a candle timestamp — see _utc_hour."""
+    return dt.date() if dt.tzinfo is None else dt.astimezone(timezone.utc).date()
 
 
 def _asian_range(
     m1_candles: List[Candle],
     anchor_date: date,
-    offset_hours: int = 0,
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Return (asian_high, asian_low) from candles in [02:00, 10:00) real UTC on anchor_date."""
+    """Return (asian_high, asian_low) from candles in [02:00, 10:00) on anchor_date."""
     highs, lows = [], []
     for c in m1_candles:
-        d = _utc_date(c.time, offset_hours)
-        h = _utc_hour(c.time, offset_hours)
+        d = _utc_date(c.time)
+        h = _utc_hour(c.time)
         if d == anchor_date and _ASIAN_START_UTC <= h < _ASIAN_END_UTC:
             highs.append(c.high)
             lows.append(c.low)
@@ -102,13 +93,10 @@ class EURUSDStrategyEngine(IStrategyEngine):
         self,
         symbols: List[str],
         tick_buffer: int = 512,
-        broker_utc_offset_hours: int = 0,
     ) -> None:
-        # Broker server clock offset from real UTC, live-detected at connect
-        # time (see mt5_gateway.detect_utc_offset / config.BROKER_UTC_OFFSET_HOURS).
-        # The Asian-range and breakout-window checks below need this since
-        # candle.time is stamped in broker-server time, not UTC.
-        self._utc_offset_hours = broker_utc_offset_hours
+        # candle.time arrives already offset-corrected (see
+        # market_data_repo.mt5_epoch_to_datetime) — this engine reads it
+        # directly with no further conversion.
         self._symbols      = list(symbols)
         self._tick_buffer  = tick_buffer
         self._candles: Dict[str, Dict[Timeframe, Deque[Candle]]] = {s: {} for s in symbols}
@@ -185,8 +173,8 @@ class EURUSDStrategyEngine(IStrategyEngine):
             return None
 
         now_utc  = trigger.time
-        utc_h    = _utc_hour(now_utc, self._utc_offset_hours)
-        today    = _utc_date(now_utc, self._utc_offset_hours)
+        utc_h    = _utc_hour(now_utc)
+        today    = _utc_date(now_utc)
 
         # Only look for breakouts inside the London window
         if not (_ASIAN_END_UTC <= utc_h < _BREAKOUT_END_UTC):
@@ -210,7 +198,7 @@ class EURUSDStrategyEngine(IStrategyEngine):
         if cached is not None and cached[0] == today:
             asian_high, asian_low = cached[1], cached[2]
         else:
-            asian_high, asian_low = _asian_range(m1_candles, today, self._utc_offset_hours)
+            asian_high, asian_low = _asian_range(m1_candles, today)
             if asian_high is not None:
                 self._daily_range[symbol] = (today, asian_high, asian_low)
         if asian_high is None:
@@ -298,6 +286,18 @@ class EURUSDStrategyEngine(IStrategyEngine):
         )
         self._last_signal_date[symbol] = today
 
+        # Tick velocity from recent ticks — was hardcoded to 0.0 here, which
+        # unconditionally failed EntryGate's tick_velocity_too_low gate
+        # (threshold 1.0 ticks/s) for every EURUSD signal regardless of
+        # actual market activity. push_tick() already maintains a real
+        # per-symbol tick buffer; compute velocity from it like XAUUSDStrategyEngine does.
+        ticks = list(self._ticks.get(symbol, []))
+        if len(ticks) >= 2:
+            dt  = ticks[-1][2] - ticks[0][2]
+            vel = len(ticks) / dt if dt > 0 else 0.0
+        else:
+            vel = 0.0
+
         sig = StrategySignal(
             symbol          = symbol,
             direction       = direction,
@@ -307,7 +307,7 @@ class EURUSDStrategyEngine(IStrategyEngine):
             stop_loss       = round(stop,  5),
             take_profit_1   = round(tp1,   5),
             take_profit_2   = round(tp2,   5),
-            tick_velocity   = 0.0,
+            tick_velocity   = vel,
             tq_score        = round(tq, 3),
             last_swing_support    = round(swing_lo, 5),
             last_swing_resistance = round(swing_hi, 5),

@@ -104,7 +104,21 @@ class ZmqFeed:
         # Binary mode + manual decode: guarantees the byte offset is exact
         # across separate open() calls (text-mode tell()/seek() cookies are
         # only formally portable when reused on the *same* file object).
-        offset = 0
+        #
+        # `offset is None` means "haven't connected to this file yet" — on
+        # that first connection (process startup, or the EA file reappearing
+        # after being missing) we jump straight to end-of-file instead of
+        # reading from byte 0. The EA only truncates this file on its OWN
+        # restart, not on every Python-side restart, so it can accumulate a
+        # day+ of backlog between EA restarts. Replaying that backlog here
+        # served no purpose — main_stream.py already re-seeds every
+        # CandleBuilder with historical candles straight from MT5 on startup
+        # — and it actively corrupted the live clock: BrokerClock/heartbeat
+        # would report whatever ancient timestamp the backlog was currently
+        # replaying, and CandleBuilder would discard those replayed candles
+        # as "out of order" against the fresher MT5-seeded cache, for as
+        # long as the fast-forward replay took to catch up to real time.
+        offset: Optional[int] = None
         buf = b""
         connected = False
         while not self._stop.is_set():
@@ -112,9 +126,18 @@ class ZmqFeed:
                 with open(self._feed_file, "rb") as fh:
                     fh.seek(0, 2)
                     size = fh.tell()
-                    if size < offset:
+                    if offset is None:
+                        offset = size
+                        logger.info(
+                            "FileFeed: skipping %d bytes of existing backlog — "
+                            "starting from the live tail (history already seeded from MT5).",
+                            size,
+                        )
+                    elif size < offset:
                         # EA rotated (truncated) the file, or a fresh EA
-                        # session started — restart from the top.
+                        # session started — restart from the top of the new,
+                        # much smaller file (this is recent content, not a
+                        # multi-hour backlog, so reading all of it is fine).
                         offset = 0
                         buf = b""
                         logger.info("FileFeed: feed file shrank — EA restarted, resetting offset")
@@ -134,8 +157,8 @@ class ZmqFeed:
                 if connected:
                     logger.info("FileFeed: feed file disappeared — waiting for EA to recreate it")
                     connected = False
-                    offset = 0
                     buf = b""
+                offset = None  # re-arm "skip existing backlog" for whatever file appears next
             except Exception as exc:
                 logger.warning("FileFeed: read error: %s", exc)
             time.sleep(_POLL_INTERVAL_S)

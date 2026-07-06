@@ -74,6 +74,10 @@ class _OpenTradeState:
     realized_money:   float = 0.0   # money banked on partial closes (price-based, non-MFE)
     digits:           int   = 5
     grade:            str   = "B"
+    # Defensive default only — every real construction site (execute_entry_candidate,
+    # the outside-bot-position reconstruction in _monitor_open_trades, load_runtime_state)
+    # passes created_at explicitly using bot time (MT5-derived). This host-clock
+    # fallback should never actually be hit on the live path.
     created_at:       datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     sl_trailed:       bool  = False
     recent_signals:   list  = field(default_factory=list)
@@ -147,7 +151,6 @@ class ExecutionService:
         min_rr:            float,
         account_currency:  str,
         journal:           TradeJournal,
-        clock=             None,
         guardian:          Optional[ITradeGuardian] = None,
     ) -> None:
         self._md         = market_data
@@ -160,7 +163,6 @@ class ExecutionService:
         self._min_rr     = min_rr
         self._currency   = account_currency
         self._journal    = journal
-        self._clock      = clock
         # Strategy-supplied open-trade re-evaluation brain. Placeholder = no-op,
         # so trades are managed by the mechanical layer only until a real
         # ITradeGuardian is injected.
@@ -178,7 +180,7 @@ class ExecutionService:
     def open_count_for_symbol(self, symbol: str) -> int:
         return sum(1 for p in self._tr.get_open_positions() if p.symbol == symbol)
 
-    def is_symbol_paused(self, symbol: str, now: Optional[datetime] = None) -> bool:
+    def is_symbol_paused(self, symbol: str, now: datetime) -> bool:
         """
         True while a symbol is in a loss-streak cooldown. Enforced by EntryGate
         as a hard gate so the bot actually stops after a run of losses (the old
@@ -187,13 +189,12 @@ class ExecutionService:
         until = self._streak_pause.get(symbol)
         if until is None:
             return False
-        now = now or datetime.now(tz=timezone.utc)
         if now >= until:
             self._streak_pause[symbol] = None
             return False
         return True
 
-    def is_reversal_cooldown(self, symbol: str, now: Optional[datetime] = None) -> bool:
+    def is_reversal_cooldown(self, symbol: str, now: datetime) -> bool:
         """
         True while a symbol is in a post-reversal cooldown — blocks re-entry churn
         after the bot has just flipped/closed a position against a reversal.
@@ -201,26 +202,24 @@ class ExecutionService:
         until = self._reversal_cooldown.get(symbol)
         if until is None:
             return False
-        now = now or datetime.now(tz=timezone.utc)
         if now >= until:
             self._reversal_cooldown[symbol] = None
             return False
         return True
 
-    def _arm_reversal_cooldown(self, symbol: str) -> None:
+    def _arm_reversal_cooldown(self, symbol: str, now: datetime) -> None:
         secs = getattr(config, "REVERSAL_REENTRY_COOLDOWN_SEC", 120)
         if secs and secs > 0:
-            self._reversal_cooldown[symbol] = datetime.now(tz=timezone.utc) + timedelta(seconds=secs)
+            self._reversal_cooldown[symbol] = now + timedelta(seconds=secs)
 
     def has_tp1_hit_for_symbol(self, symbol: str) -> bool:
         return any(s.tp1_hit for s in self._trade_states.values() if s.symbol == symbol)
 
     # ── Public monitoring entry-points ────────────────────────────────
 
-    def run_monitoring_only(self, symbol: str) -> None:
+    def run_monitoring_only(self, symbol: str, now: datetime) -> None:
         """Tick-level monitoring: TP hits, time exit, MFE tracking."""
-        now = datetime.now(tz=timezone.utc)
-        self._prune_closed_positions()
+        self._prune_closed_positions(now)
         if getattr(config, "MONITOR_ENABLED", True):
             self._monitor_open_trades(symbol, now)
 
@@ -313,7 +312,7 @@ class ExecutionService:
 
         for action in actions:
             try:
-                self._apply_guardian_action(symbol, action, pip_calc)
+                self._apply_guardian_action(symbol, action, pip_calc, now)
             except Exception as exc:
                 logger.exception("Guardian action apply failed [%s] ticket=%s: %s",
                                  symbol, action.ticket, exc)
@@ -323,6 +322,7 @@ class ExecutionService:
         symbol:   str,
         action:   GuardianAction,
         pip_calc: PipCalculator,
+        now:      datetime,
     ) -> None:
         """Apply one GuardianAction to the corresponding open trade."""
         ticket = action.ticket
@@ -387,22 +387,22 @@ class ExecutionService:
 
         elif action.type == GuardianActionType.CLOSE:
             if self._tr.close_trade(ticket):
-                self._finalize_close(ticket, state, action=action.reason or "guardian_close")
+                self._finalize_close(ticket, state, action=action.reason or "guardian_close", now=now)
                 if action.arm_cooldown:
-                    self._arm_reversal_cooldown(symbol)
+                    self._arm_reversal_cooldown(symbol, now)
                 logger.info(
                     "GUARDIAN_CLOSE [%s] ticket=%s | %s", symbol, ticket, action.reason,
                 )
 
     # ── Trade execution ───────────────────────────────────────────────
 
-    def execute_entry_candidate(self, candidate: EntryCandidate) -> Optional[Trade]:
+    def execute_entry_candidate(self, candidate: EntryCandidate, now: datetime) -> Optional[Trade]:
         """Build, margin-check, and place the trade for a pre-evaluated candidate."""
         symbol = candidate.symbol
         signal = candidate.signal
         trade  = self._build_trade(
             signal, candidate.broker_cost, candidate.pip_calc,
-            candidate.pip_value, candidate.risk_pct,
+            candidate.pip_value, now, candidate.risk_pct,
         )
         if trade is None:
             return None
@@ -467,7 +467,7 @@ class ExecutionService:
             pip_value=candidate.pip_value, initial_risk=initial_risk,
             mfe_price=trade.entry_price,
             digits=candidate.digits, grade=candidate.grade,
-            created_at=datetime.now(tz=timezone.utc),
+            created_at=now,
             entry_confidence=confidence,
             last_reeval_score=1.0,
         )
@@ -542,6 +542,12 @@ class ExecutionService:
                     tp1_price=tp1_price, tp2_price=tp2_price,
                     lot_size=pos.lot_size, initial_lot=pos.lot_size,
                     mfe_price=pos.entry_price, digits=digits,
+                    # pos.created_at is MT5-derived (trade_repo.get_open_positions()
+                    # via mt5_epoch_to_datetime) — always pass it explicitly so the
+                    # time-based exit below compares like-for-like against `now`
+                    # (also MT5-derived). Without this it silently defaulted to the
+                    # dataclass field's host-clock fallback.
+                    created_at=pos.created_at,
                 )
                 # Per-pip value for analytics pip conversion (best-effort).
                 try:
@@ -689,7 +695,7 @@ class ExecutionService:
 
             if should_close and getattr(config, "MONITOR_ACT_ON_SIGNALS", True):
                 if self._tr.close_trade(ticket):
-                    self._finalize_close(ticket, state, action=action)
+                    self._finalize_close(ticket, state, action=action, now=now)
                     logger.info(
                         "TIME_EXIT [%s] action=%s ticket=%s | held=%.1fmin",
                         symbol, action, ticket, duration_min,
@@ -713,7 +719,7 @@ class ExecutionService:
             state.reeval_count, state.last_reeval_score,
         )
 
-    def _prune_closed_positions(self) -> None:
+    def _prune_closed_positions(self, now: datetime) -> None:
         """
         Reconcile tracking state for positions MT5 has already closed
         (server-side SL/TP, or manual). Uses BROKER-TRUTH realised P&L — never
@@ -725,11 +731,11 @@ class ExecutionService:
             state = self._trade_states.get(t)
             if state is None:
                 continue
-            self._finalize_close(t, state, action="broker_close")
+            self._finalize_close(t, state, action="broker_close", now=now)
 
     # ── Broker-truth close finalisation ───────────────────────────────
 
-    def _finalize_close(self, ticket: int, state: "_OpenTradeState", action: str) -> float:
+    def _finalize_close(self, ticket: int, state: "_OpenTradeState", action: str, now: datetime) -> float:
         """
         Single funnel for EVERY trade close. Reads the broker's realised net P&L
         (money, account currency) from deal history and journals THAT. Falls back
@@ -763,7 +769,7 @@ class ExecutionService:
         self._trade_states.pop(ticket, None)
         self._log_trade_summary(state, pip_calc, money)
         self._journal_close(ticket, money, outcome, pips_equiv)
-        self._update_streak(state.symbol, money)
+        self._update_streak(state.symbol, money, now)
         logger.info(
             "TRADE CLOSED action=%s | %s ticket=%s | pnl=%.2f %s [%s] | pips≈%.1f | grade=%s",
             action, state.symbol, ticket, money, self._currency, source,
@@ -802,9 +808,8 @@ class ExecutionService:
             return 0.0
         return round(money / denom, 2)
 
-    def _update_streak(self, symbol: str, pnl_money: float) -> None:
+    def _update_streak(self, symbol: str, pnl_money: float, now: datetime) -> None:
         """Track loss streak for analytics and alerting (no trading pause by default)."""
-        now    = datetime.now(tz=timezone.utc)
         streak = self._loss_streak.get(symbol, 0)
         if pnl_money < 0:
             streak += 1
@@ -907,6 +912,7 @@ class ExecutionService:
         broker_cost:       BrokerCost,
         pip_calc:          PipCalculator,
         pip_value:         float,
+        now:               datetime,
         risk_pct_override: Optional[float] = None,
     ) -> Optional[Trade]:
         """
@@ -1033,7 +1039,7 @@ class ExecutionService:
             take_profit=signal.take_profit,
             lot_size=lot_size,
             status=TradeStatus.PENDING,
-            created_at=datetime.now(tz=timezone.utc),
+            created_at=now,
             commission=broker_cost.commission_per_lot * lot_size,
             spread_cost=broker_cost.spread_pips,
         )
