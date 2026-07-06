@@ -334,32 +334,77 @@ class MT5Gateway:
         Falls back to 0 when no recent tick is available (weekend or
         market closed), so callers should keep the config default as a
         manual fallback for those cases.
+
+        Takes several samples a couple seconds apart and requires two
+        consecutive samples to agree before trusting the result, instead of
+        trusting a single point-in-time reading.
+
+        WHY: confirmed live that immediately after this process starts
+        (right after MT5 connects, freshly under Wine), `time.time()` can
+        read several hours behind true wall-clock for roughly the first
+        minute before self-correcting — a transient Wine clock-sync quirk,
+        not a real timezone difference. A single sample taken during that
+        window silently mismeasures the broker offset (the process's own
+        `real_utc` reading is what's wrong, not the broker), and since this
+        offset is detected once and applied statically for the whole
+        session, one bad sample would corrupt every session-window /
+        news-blocking decision until the next restart. Requiring two
+        consecutive agreeing samples catches this: a genuine broker offset
+        stays constant a couple seconds apart, while a mid-self-correction
+        clock reads differently each time.
         """
         import time as _time
         if not self._ensure_ready():
             return 0
-        tick = mt5.symbol_info_tick("EURUSD")
-        if tick is None:
-            logger.warning("detect_utc_offset: no EURUSD tick — defaulting to 0")
-            return 0
-        server_ts   = int(tick.time)
-        real_utc    = int(_time.time())
-        age_seconds = real_utc - server_ts
-        if age_seconds > 600:
-            # Tick older than 10 min → market closed, timestamp stale and unreliable
-            logger.warning(
-                "detect_utc_offset: EURUSD tick is %ds old (market closed?) "
-                "— defaulting to 0.", age_seconds,
-            )
-            return 0
-        offset = round((server_ts - real_utc) / 3600)
-        offset = max(-12, min(14, offset))   # clamp to valid timezone range
-        logger.info(
-            "Broker UTC offset detected: UTC%+d  "
-            "(server_ts=%d  real_utc=%d  age=%ds)",
-            offset, server_ts, real_utc, age_seconds,
+
+        _MAX_ATTEMPTS   = 6
+        _SAMPLE_GAP_SEC = 2.0
+        prev_offset: Optional[int] = None
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            tick = mt5.symbol_info_tick("EURUSD")
+            if tick is None:
+                logger.warning("detect_utc_offset: no EURUSD tick — defaulting to 0")
+                return 0
+            server_ts   = int(tick.time)
+            real_utc    = int(_time.time())
+            age_seconds = real_utc - server_ts
+            if age_seconds > 600:
+                # Tick older than 10 min → market closed, timestamp stale and unreliable
+                logger.warning(
+                    "detect_utc_offset: EURUSD tick is %ds old (market closed?) "
+                    "— defaulting to 0.", age_seconds,
+                )
+                return 0
+
+            offset = round((server_ts - real_utc) / 3600)
+            offset = max(-12, min(14, offset))   # clamp to valid timezone range
+
+            if prev_offset is not None and offset == prev_offset:
+                logger.info(
+                    "Broker UTC offset detected: UTC%+d  "
+                    "(server_ts=%d  real_utc=%d  age=%ds, confirmed over 2 samples)",
+                    offset, server_ts, real_utc, age_seconds,
+                )
+                return offset
+
+            if prev_offset is not None:
+                logger.warning(
+                    "detect_utc_offset: unstable reading (sample %d: UTC%+d, "
+                    "previous: UTC%+d) — process clock may still be settling "
+                    "after startup; re-sampling.",
+                    attempt, offset, prev_offset,
+                )
+            prev_offset = offset
+            if attempt < _MAX_ATTEMPTS:
+                _time.sleep(_SAMPLE_GAP_SEC)
+
+        logger.warning(
+            "detect_utc_offset: readings never stabilized after %d attempts — "
+            "using the last sample (UTC%+d) but this may be unreliable.",
+            _MAX_ATTEMPTS, prev_offset,
         )
-        return offset
+        return prev_offset if prev_offset is not None else 0
 
     # ── Order Execution ───────────────────────────────────────────
 
