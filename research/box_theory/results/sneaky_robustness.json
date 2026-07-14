@@ -1,0 +1,213 @@
+{
+  "oos": [
+    {
+      "config": "EURUSD M5 6mo fractal/allday/swing wB b0.15 opposite",
+      "in_sample": {
+        "n": 25,
+        "expR": 1.950584061753046,
+        "pf": 3.392300196200882,
+        "net": 56.38201972625767
+      },
+      "out_sample": {
+        "n": 7,
+        "expR": 3.3874383339986407,
+        "pf": 3.57406509024325,
+        "net": 21.7569979897021
+      }
+    },
+    {
+      "config": "AUDUSD M30 24mo literal/open_broker/swing wA b0.10 opposite",
+      "in_sample": {
+        "n": 21,
+        "expR": 2.9463727616081323,
+        "pf": 5.115786708163191,
+        "net": 78.58834175515888
+      },
+      "out_sample": {
+        "n": 9,
+        "expR": -0.5488058321887611,
+        "pf": 0.45548066638694584,
+        "net": -4.954006895429275
+      }
+    },
+    {
+      "config": "GBPUSD M15 24mo literal/open_london/range wD b0.05 opposite",
+      "in_sample": {
+        "n": 23,
+        "expR": 1.2007209679361062,
+        "pf": 3.009047954060739,
+        "net": 30.080903459353436
+      },
+      "out_sample": {
+        "n": 9,
+        "expR": 1.092890307125685,
+        "pf": 2.387808813127503,
+        "net": 9.750416083422042
+      }
+    },
+    {
+      "config": "USDCAD M30 6mo literal/open_broker/range wC b0.20 opposite",
+      "in_sample": {
+        "n": 89,
+        "expR": -0.34023813052188784,
+        "pf": 0.6078104139162606,
+        "net": -28.012430583557535
+      },
+      "out_sample": {
+        "n": 30,
+        "expR": 1.2230235204187068,
+        "pf": 2.3725646735036388,
+        "net": 41.21847667787526
+      }
+    },
+    {
+      "config": "USDJPY M15 24mo literal/open_broker/swing wA b0.20 opposite",
+      "in_sample": {
+        "n": 25,
+        "expR": 1.2871401519735022,
+        "pf": 2.174934224696508,
+        "net": 31.503864211489297
+      },
+      "out_sample": {
+        "n": 11,
+        "expR": 0.7688888240318218,
+        "pf": 1.8047942127125989,
+        "net": 7.783260070764819
+      }
+    },
+    {
+      "config": "XAUUSD M15 12mo literal/open_broker/range wB b0.10 opposite",
+      "in_sample": {
+        "n": 62,
+        "expR": 0.10715207068940892,
+        "pf": 1.0444972025565067,
+        "net": 2.53625180070427
+      },
+      "out_sample": {
+        "n": 19,
+        "expR": 1.4931980758507295,
+        "pf": 2.6365189785045398,
+        "net": 29.425596519608742
+      }
+    }
+  ],
+  "walk_forward": [
+    {
+      "symbol": "EURUSD",
+      "mean_oos_expR": 0.6071809189211063,
+      "folds": [
+        0.473,
+        1.254,
+        -0.087,
+        0.788
+      ]
+    },
+    {
+      "symbol": "GBPUSD",
+      "mean_oos_expR": -0.4331961804773645,
+      "folds": [
+        0.028,
+        -0.983,
+        -0.317,
+        -0.461
+      ]
+    },
+    {
+      "symbol": "USDJPY",
+      "mean_oos_expR": -0.4451211286184283,
+      "folds": [
+        -0.386,
+        -0.345,
+        -1.114,
+        0.065
+      ]
+    },
+    {
+      "symbol": "AUDUSD",
+      "mean_oos_expR": 0.4233007512422935,
+      "folds": [
+        0.598,
+        1.196,
+        0.342,
+        -0.443
+      ]
+    },
+    {
+      "symbol": "USDCAD",
+      "mean_oos_expR": -0.24244266427017508,
+      "folds": [
+        -0.183,
+        0.341,
+        -0.268,
+        -0.86
+      ]
+    },
+    {
+      "symbol": "XAUUSD",
+      "mean_oos_expR": -0.20795219257976186,
+      "folds": [
+        0.369,
+        -0.699,
+        0.538,
+        -1.041
+      ]
+    }
+  ],
+  "monte_carlo": [
+    {
+      "config": "EURUSD M5 6mo fractal/allday/swing wB b0.15 opposite",
+      "n": 32,
+      "p_profit": 97.3,
+      "net_median": 85.4,
+      "net_p5": 8.0,
+      "maxdd_median": 9.1,
+      "maxdd_p95": 17.0
+    },
+    {
+      "config": "AUDUSD M30 24mo literal/open_broker/swing wA b0.10 opposite",
+      "n": 30,
+      "p_profit": 98.2,
+      "net_median": 67.5,
+      "net_p5": 12.0,
+      "maxdd_median": 7.4,
+      "maxdd_p95": 14.1
+    },
+    {
+      "config": "GBPUSD M15 24mo literal/open_london/range wD b0.05 opposite",
+      "n": 31,
+      "p_profit": 98.2,
+      "net_median": 41.5,
+      "net_p5": 6.5,
+      "maxdd_median": 5.7,
+      "maxdd_p95": 10.9
+    },
+    {
+      "config": "USDCAD M30 6mo literal/open_broker/range wC b0.20 opposite",
+      "n": 119,
+      "p_profit": 51.3,
+      "net_median": 0.9,
+      "net_p5": -38.0,
+      "maxdd_median": 26.7,
+      "maxdd_p95": 45.5
+    },
+    {
+      "config": "USDJPY M15 24mo literal/open_broker/swing wA b0.20 opposite",
+      "n": 36,
+      "p_profit": 86.3,
+      "net_median": 39.1,
+      "net_p5": -14.0,
+      "maxdd_median": 12.6,
+      "maxdd_p95": 23.1
+    },
+    {
+      "config": "XAUUSD M15 12mo literal/open_broker/range wB b0.10 opposite",
+      "n": 81,
+      "p_profit": 77.5,
+      "net_median": 29.7,
+      "net_p5": -23.4,
+      "maxdd_median": 20.8,
+      "maxdd_p95": 36.2
+    }
+  ],
+  "pooled_wf_expR": -0.04979166666666666
+}

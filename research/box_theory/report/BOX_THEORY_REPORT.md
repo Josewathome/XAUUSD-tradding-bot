@@ -17,6 +17,8 @@
 
 - The only sub-family that ever shows positive expectancy is *exit-at-opposite-side-of-box* — which is **not** the stated thesis (a small fade off a rejection) but a tight-stop / large-target lottery. Its gains are recent, fragile to tiny parameter changes, and carry 40–68% drawdowns. Not a reliable edge.
 
+- **A refined variant — the "Sneaky Pivot" (adds swing levels beyond the range, a session-open entry sequence, and an opposite-side target) — was also tested (Part II).** It is a genuine structural improvement (29% of its configs are profitable vs 13%; median -0.108 R vs -0.153 R) but still fails walk-forward (pooled -0.050 R) and its per-pair winners rest on too few trades. Still no robust edge.
+
 
 ## 2. Strategy Rules (as tested)
 
@@ -131,5 +133,51 @@ The top config's expectancy collapses from ~1.0 R to ~0.2 R as the buffer moves 
 The data **rejects** the Box Theory as a source of edge. The false assumption is the core one: price does **not** preferentially reverse at PDH/PDL (reversal ≈ 50%%; often continuation). Rejection-candle filters add only marginal signal that costs erase, especially intraday. The one profitable-looking variant abandons the thesis (targets the opposite side, not a fade) and fails walk-forward. **No configuration is recommended for live trading.** If pursued further, the only faintly promising direction is a *midpoint mean-reversion* study (price reaches mid ~65%% of the time after an extreme) on M30 — but that is a different strategy and would need its own out-of-sample validation.
 
 
+
+# Part II — The Sneaky Pivot (refined variant)
+
+After the initial finding, the strategy was refined to the fuller *Sneaky Pivot* form and re-tested with **48,384** configurations. It adds three things the basic box test lacked: (1) **swing levels** beyond the previous-day range (nearest prior extreme, plus an N-bar fractal-pivot definition), (2) a **session-open entry sequence** (opening candle → 'sneaky' pivot → enter on the break, anchored to the broker rollover, London, or NY open), and (3) an explicit **opposite-side (range-bound) target** with the stop beyond the pivot wick.
+
+
+## 11. Sneaky Pivot — edge distribution
+
+![sdist](fig_sneaky_distribution.png)
+
+A real improvement over the basic box: **29%** of valid configs are profitable (vs 13% before) and the median rises to **-0.108 R** (from -0.153). But the distribution still sits below break-even — 71% lose.
+
+
+## 12. Does the session-open timing add edge?
+
+![stiming](fig_sneaky_timing.png)
+
+This is the Sneaky Pivot's signature claim, and the answer is no on average: every timing anchor averages negative. A single pair/config (EURUSD, NY-open, swing levels) looked strong in isolation (+0.77 R) but did **not** generalise — averaged across the sweep, NY-open is negative. Swing levels + opposite-side target + the 24-month window is where the faintest signal concentrates; XAUUSD is again the least-bad pair.
+
+
+## 13. Sneaky Pivot — best config per pair (≥30 trades)
+
+| Pair | Config | Trades | Win% | PF | ExpR | Net% | MaxDD% |
+|---|---|---:|---:|---:|---:|---:|---:|
+| EURUSD | M5 6mo fractal/allday/swing wB b0.15 opposite | 32 | 28.1 | 3.46 | 2.265 | 90.4 | 6.7 |
+| AUDUSD | M30 24mo literal/open_broker/swing wA b0.10 opposite | 30 | 33.3 | 2.97 | 1.898 | 69.7 | 7.7 |
+| GBPUSD | M15 24mo literal/open_london/range wD b0.05 opposite | 31 | 38.7 | 2.76 | 1.199 | 42.3 | 4.3 |
+| USDCAD | M30 6mo literal/open_broker/range wC b0.20 opposite | 36 | 33.3 | 2.27 | 1.141 | 46.8 | 4.8 |
+| USDJPY | M15 24mo literal/open_broker/swing wA b0.20 opposite | 36 | 19.4 | 2.06 | 1.129 | 41.7 | 9.4 |
+| XAUUSD | M15 12mo literal/open_broker/range wB b0.10 opposite | 34 | 20.6 | 2.16 | 1.050 | 37.5 | 7.9 |
+
+The payoff profile is the tell: low win rates (20–40%) with high PF via the large opposite-side target, on **30–60 trade** samples. Too thin to trust — which §14 confirms.
+
+
+## 14. Sneaky Pivot — robustness
+
+![swf](fig_sneaky_walkforward.png)
+
+**Walk-forward selection pools to -0.050 R** — again indistinguishable from zero, with large per-pair swings (EURUSD +0.61, AUDUSD +0.42, but GBPUSD/USDJPY ≈ −0.44). The 70/30 out-of-sample test is *inconclusive by construction*: the selective swing entries leave only **7–30 trades** out-of-sample, so single trades swing the result (EURUSD OOS +3.4 R on 7 trades; AUDUSD flips +2.95 → −0.55). Monte Carlo shows high P(profit) only because it resamples an already-selected ~25-trade set — it cannot see selection bias, which walk-forward can.
+
+
+## 15. Overall Verdict (both strategies)
+
+The Box Theory reversal premise is empirically false (PDH/PDL reversal ≈ coin flip), and neither the basic form nor the refined Sneaky Pivot delivers a statistically robust, tradeable edge on this data: both pool to ≈0 R in walk-forward. The Sneaky Pivot is the better-constructed idea — it is near break-even rather than clearly negative, and it correctly points to the one real tendency in the data (a pull toward the range *centre/opposite side*, not a hard rejection at the edge). **Neither is recommended for live trading as-is.** If research continues, the defensible direction is: swing-level fades targeting the opposite side, on M15/M30 over the longest window, on XAUUSD/EURUSD — but the trade counts are too low here to confirm significance, so it needs materially more data (more history and/or more instruments) before any capital risk is justified.
+
+
 ---
-*Reproduce:* `python -m box_theory.export_data` (in container) → `sweep` → `robustness` → `report`. Raw tables in `results/`.
+*Reproduce:* `python -m box_theory.export_data` (in container) → `sweep`/`sneaky_sweep` → `robustness`/`sneaky_robustness` → `report`. Raw tables in `results/`.

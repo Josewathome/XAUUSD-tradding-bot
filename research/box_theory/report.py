@@ -151,6 +151,45 @@ def chart_equity_best(top_row):
     return _fig(os.path.join(REPORT, "fig_equity_best.png"))
 
 
+def chart_sneaky_timing(valid):
+    g = valid.groupby("timing")["expectancy_r"].mean().reindex(
+        ["allday", "open_broker", "open_london", "open_ny"])
+    plt.figure(figsize=(8, 4))
+    colors = ["#E45756" if v < 0 else "#54A24B" for v in g.values]
+    plt.bar([s.replace("open_", "open@") for s in g.index], g.values, color=colors)
+    plt.axhline(0, color="black", lw=0.8)
+    plt.ylabel("mean expectancy (R)")
+    plt.title("Sneaky Pivot: does session-open timing add edge? (all negative)")
+    return _fig(os.path.join(REPORT, "fig_sneaky_timing.png"))
+
+
+def chart_sneaky_dist(valid):
+    e = valid["expectancy_r"].replace([np.inf, -np.inf], np.nan).dropna()
+    plt.figure(figsize=(9, 4.5))
+    plt.hist(e, bins=60, color="#B279A2", edgecolor="white")
+    plt.axvline(0, color="red", ls="--", lw=1.2, label="break-even")
+    plt.axvline(e.median(), color="black", lw=1.2, label="median %.3f" % e.median())
+    plt.xlabel("expectancy (R per trade)")
+    plt.ylabel("# of configurations")
+    plt.title("Sneaky Pivot edge distribution — %.0f%% still lose" % (100 * (e <= 0).mean()))
+    plt.legend(fontsize=8)
+    return _fig(os.path.join(REPORT, "fig_sneaky_distribution.png"))
+
+
+def chart_sneaky_wf(rob):
+    plt.figure(figsize=(9, 4.5))
+    for w in rob["walk_forward"]:
+        plt.plot(range(1, len(w["folds"]) + 1), w["folds"], marker="o", label=w["symbol"])
+    plt.axhline(0, color="black", lw=0.8)
+    plt.axhline(rob["pooled_wf_expR"], color="red", ls="--", lw=1.2,
+                label="pooled %.3f" % rob["pooled_wf_expR"])
+    plt.xlabel("walk-forward test fold")
+    plt.ylabel("out-of-sample expR")
+    plt.title("Sneaky Pivot walk-forward — pooled OOS expectancy ≈ 0")
+    plt.legend(fontsize=8, ncol=2)
+    return _fig(os.path.join(REPORT, "fig_sneaky_walkforward.png"))
+
+
 def main():
     os.makedirs(REPORT, exist_ok=True)
     m = pd.read_csv(os.path.join(RES, "master_results.csv"))
@@ -159,6 +198,12 @@ def main():
         rob = json.load(f)
     m1 = m[m.risk_pct == 0.01].copy()
     valid = m1[m1.total_trades >= MIN_TRADES].copy()
+
+    # Sneaky Pivot (Part II) data
+    sm = pd.read_csv(os.path.join(RES, "sneaky_master.csv"))
+    svalid = sm[(sm.risk_pct == 0.01) & (sm.total_trades >= MIN_TRADES)].copy()
+    with open(os.path.join(RES, "sneaky_robustness.json")) as f:
+        srob = json.load(f)
 
     figs = {
         "zone": chart_zone(z),
@@ -171,6 +216,17 @@ def main():
     top_overall = valid.sort_values("expectancy_r", ascending=False).iloc[0]
     worst = valid.sort_values("expectancy_r").iloc[0]
     figs["equity"] = chart_equity_best(top_overall)
+    figs["s_timing"] = chart_sneaky_timing(svalid)
+    figs["s_dist"] = chart_sneaky_dist(svalid)
+    figs["s_wf"] = chart_sneaky_wf(srob)
+
+    se = svalid["expectancy_r"].replace([np.inf, -np.inf], np.nan).dropna()
+    s_frac_lose = 100 * (se <= 0).mean()
+    s_med = se.median()
+    s_pooled = srob["pooled_wf_expR"]
+    s_pp = valid  # placeholder to keep names tidy
+    sperpair = svalid.loc[svalid.groupby("symbol")["expectancy_r"].idxmax()].sort_values(
+        "expectancy_r", ascending=False)
 
     # headline numbers
     e = valid["expectancy_r"].replace([np.inf, -np.inf], np.nan).dropna()
@@ -204,6 +260,11 @@ def main():
     A("- The only sub-family that ever shows positive expectancy is *exit-at-opposite-side-of-box* — which is **not** the "
       "stated thesis (a small fade off a rejection) but a tight-stop / large-target lottery. Its gains are recent, "
       "fragile to tiny parameter changes, and carry 40–68% drawdowns. Not a reliable edge.\n")
+    A("- **A refined variant — the \"Sneaky Pivot\" (adds swing levels beyond the range, a session-open entry "
+      "sequence, and an opposite-side target) — was also tested (Part II).** It is a genuine structural improvement "
+      "(%.0f%% of its configs are profitable vs 13%%; median %.3f R vs %.3f R) but still fails walk-forward "
+      "(pooled %.3f R) and its per-pair winners rest on too few trades. Still no robust edge.\n" % (
+        100 - s_frac_lose, s_med, med_exp, s_pooled))
 
     A("\n## 2. Strategy Rules (as tested)\n")
     A("Daily box from the **previous** day's D1 bar: Top = PDH, Bottom = PDL, Middle = 50%. "
@@ -304,8 +365,58 @@ def main():
       "live trading.** If pursued further, the only faintly promising direction is a *midpoint mean-reversion* study "
       "(price reaches mid ~65%% of the time after an extreme) on M30 — but that is a different strategy and would need "
       "its own out-of-sample validation.\n")
-    A("\n---\n*Reproduce:* `python -m box_theory.export_data` (in container) → `sweep` → `robustness` → `report`. "
-      "Raw tables in `results/`.\n")
+    # ────────────────────────── PART II — SNEAKY PIVOT ──────────────────────────
+    A("\n\n# Part II — The Sneaky Pivot (refined variant)\n")
+    A("After the initial finding, the strategy was refined to the fuller *Sneaky Pivot* form and re-tested with "
+      "**48,384** configurations. It adds three things the basic box test lacked: (1) **swing levels** beyond the "
+      "previous-day range (nearest prior extreme, plus an N-bar fractal-pivot definition), (2) a **session-open entry "
+      "sequence** (opening candle → 'sneaky' pivot → enter on the break, anchored to the broker rollover, London, or "
+      "NY open), and (3) an explicit **opposite-side (range-bound) target** with the stop beyond the pivot wick.\n")
+
+    A("\n## 11. Sneaky Pivot — edge distribution\n")
+    A("![sdist](%s)\n" % figs["s_dist"])
+    A("A real improvement over the basic box: **%.0f%%** of valid configs are profitable (vs 13%% before) and the "
+      "median rises to **%.3f R** (from %.3f). But the distribution still sits below break-even — %.0f%% lose.\n" % (
+        100 - s_frac_lose, s_med, med_exp, s_frac_lose))
+
+    A("\n## 12. Does the session-open timing add edge?\n")
+    A("![stiming](%s)\n" % figs["s_timing"])
+    A("This is the Sneaky Pivot's signature claim, and the answer is no on average: every timing anchor averages "
+      "negative. A single pair/config (EURUSD, NY-open, swing levels) looked strong in isolation (+0.77 R) but did "
+      "**not** generalise — averaged across the sweep, NY-open is negative. Swing levels + opposite-side target + the "
+      "24-month window is where the faintest signal concentrates; XAUUSD is again the least-bad pair.\n")
+
+    A("\n## 13. Sneaky Pivot — best config per pair (≥%d trades)\n" % MIN_TRADES)
+    A("| Pair | Config | Trades | Win% | PF | ExpR | Net% | MaxDD% |")
+    A("|---|---|---:|---:|---:|---:|---:|---:|")
+    for _, r in sperpair.iterrows():
+        A("| %s | %s %smo %s/%s/%s w%s b%.02f %s | %d | %.1f | %.2f | %.3f | %.1f | %.1f |" % (
+            r.symbol, r.timeframe, r.months, r.swing_def, r.timing, r.levels_used, r.wick,
+            r.buffer_pct, r.target_kind, r.total_trades, r.win_rate, r.profit_factor,
+            r.expectancy_r, r.net_return_pct, r.max_drawdown_pct))
+    A("\nThe payoff profile is the tell: low win rates (20–40%) with high PF via the large opposite-side target, "
+      "on **30–60 trade** samples. Too thin to trust — which §14 confirms.\n")
+
+    A("\n## 14. Sneaky Pivot — robustness\n")
+    A("![swf](%s)\n" % figs["s_wf"])
+    A("**Walk-forward selection pools to %.3f R** — again indistinguishable from zero, with large per-pair swings "
+      "(EURUSD +0.61, AUDUSD +0.42, but GBPUSD/USDJPY ≈ −0.44). The 70/30 out-of-sample test is *inconclusive by "
+      "construction*: the selective swing entries leave only **7–30 trades** out-of-sample, so single trades swing "
+      "the result (EURUSD OOS +3.4 R on 7 trades; AUDUSD flips +2.95 → −0.55). Monte Carlo shows high P(profit) only "
+      "because it resamples an already-selected ~25-trade set — it cannot see selection bias, which walk-forward can.\n" % s_pooled)
+
+    A("\n## 15. Overall Verdict (both strategies)\n")
+    A("The Box Theory reversal premise is empirically false (PDH/PDL reversal ≈ coin flip), and neither the basic "
+      "form nor the refined Sneaky Pivot delivers a statistically robust, tradeable edge on this data: both pool to "
+      "≈0 R in walk-forward. The Sneaky Pivot is the better-constructed idea — it is near break-even rather than "
+      "clearly negative, and it correctly points to the one real tendency in the data (a pull toward the range "
+      "*centre/opposite side*, not a hard rejection at the edge). **Neither is recommended for live trading as-is.** "
+      "If research continues, the defensible direction is: swing-level fades targeting the opposite side, on M15/M30 "
+      "over the longest window, on XAUUSD/EURUSD — but the trade counts are too low here to confirm significance, so "
+      "it needs materially more data (more history and/or more instruments) before any capital risk is justified.\n")
+
+    A("\n---\n*Reproduce:* `python -m box_theory.export_data` (in container) → `sweep`/`sneaky_sweep` → "
+      "`robustness`/`sneaky_robustness` → `report`. Raw tables in `results/`.\n")
 
     with open(os.path.join(REPORT, "BOX_THEORY_REPORT.md"), "w") as f:
         f.write("\n".join(md))
