@@ -1,0 +1,435 @@
+{
+  "oos": [
+    {
+      "config": "EURUSD M15 wickC e2 opposite buf0.05",
+      "months": 24,
+      "in_sample": {
+        "n": 279,
+        "expR": -0.20777628110300844,
+        "pf": 0.7505851166275236,
+        "net": -48.21491931107478
+      },
+      "out_sample": {
+        "n": 121,
+        "expR": 0.6666436345166444,
+        "pf": 1.8783084303564794,
+        "net": 103.53061009844681
+      }
+    },
+    {
+      "config": "XAUUSD M15 wickD e3 opposite buf0.05",
+      "months": 24,
+      "in_sample": {
+        "n": 112,
+        "expR": -0.23479137843701306,
+        "pf": 0.679831769346521,
+        "net": -24.320978512882043
+      },
+      "out_sample": {
+        "n": 44,
+        "expR": 0.9075415091312689,
+        "pf": 2.2762904256536607,
+        "net": 45.143633535649826
+      }
+    },
+    {
+      "config": "USDJPY M15 wickD e3 opposite buf0.05",
+      "months": 24,
+      "in_sample": {
+        "n": 126,
+        "expR": 0.18451736467536492,
+        "pf": 1.2203304661644467,
+        "net": 21.909058050423447
+      },
+      "out_sample": {
+        "n": 47,
+        "expR": 0.5951921001095292,
+        "pf": 1.8173106574090334,
+        "net": 29.072525591471443
+      }
+    },
+    {
+      "config": "AUDUSD M15 wickA e2 opposite buf0.15",
+      "months": 24,
+      "in_sample": {
+        "n": 338,
+        "expR": 0.12415994931774835,
+        "pf": 1.0536399002687207,
+        "net": 23.849052215377633
+      },
+      "out_sample": {
+        "n": 146,
+        "expR": 0.3754956375379267,
+        "pf": 1.443614183678887,
+        "net": 59.37688579202272
+      }
+    },
+    {
+      "config": "GBPUSD M5 wickB e3 opposite buf0.05",
+      "months": 6,
+      "in_sample": {
+        "n": 75,
+        "expR": 0.7262529969583758,
+        "pf": 1.6167529379843788,
+        "net": 59.19166761778174
+      },
+      "out_sample": {
+        "n": 36,
+        "expR": 0.180455789527352,
+        "pf": 1.153798024012912,
+        "net": 4.9979421101664645
+      }
+    },
+    {
+      "config": "USDCAD M5 wickA e3 opposite buf0.20",
+      "months": 6,
+      "in_sample": {
+        "n": 89,
+        "expR": 0.2369232082575246,
+        "pf": 1.1575784089290702,
+        "net": 14.670719679330734
+      },
+      "out_sample": {
+        "n": 39,
+        "expR": -0.031556075796573387,
+        "pf": 0.922973370714614,
+        "net": -3.7394744414422143
+      }
+    }
+  ],
+  "walk_forward": [
+    {
+      "symbol": "EURUSD",
+      "mean_oos_expR": -0.10189859328200916,
+      "fold_expR": [
+        -0.242,
+        -0.347,
+        -0.006,
+        0.187
+      ],
+      "picks": [
+        [
+          "C",
+          1,
+          "opposite",
+          0.1,
+          89
+        ],
+        [
+          "C",
+          1,
+          "opposite",
+          0.1,
+          86
+        ],
+        [
+          "A",
+          1,
+          "midpoint",
+          0.05,
+          87
+        ],
+        [
+          "D",
+          2,
+          "midpoint",
+          0.05,
+          55
+        ]
+      ]
+    },
+    {
+      "symbol": "GBPUSD",
+      "mean_oos_expR": -0.1548811214563833,
+      "fold_expR": [
+        -0.148,
+        -0.212,
+        -0.268,
+        0.007
+      ],
+      "picks": [
+        [
+          "A",
+          2,
+          "opposite",
+          0.1,
+          90
+        ],
+        [
+          "A",
+          1,
+          "opposite",
+          0.1,
+          93
+        ],
+        [
+          "A",
+          1,
+          "opposite",
+          0.05,
+          88
+        ],
+        [
+          "D",
+          2,
+          "opposite",
+          0.05,
+          48
+        ]
+      ]
+    },
+    {
+      "symbol": "USDJPY",
+      "mean_oos_expR": 0.050844835101135674,
+      "fold_expR": [
+        -0.126,
+        -0.135,
+        0.118,
+        0.347
+      ],
+      "picks": [
+        [
+          "D",
+          3,
+          "midpoint",
+          0.05,
+          32
+        ],
+        [
+          "D",
+          3,
+          "midpoint",
+          0.05,
+          36
+        ],
+        [
+          "A",
+          2,
+          "midpoint",
+          0.1,
+          93
+        ],
+        [
+          "D",
+          3,
+          "midpoint",
+          0.05,
+          31
+        ]
+      ]
+    },
+    {
+      "symbol": "AUDUSD",
+      "mean_oos_expR": 0.36628682763663456,
+      "fold_expR": [
+        0.193,
+        1.262,
+        -0.133,
+        0.144
+      ],
+      "picks": [
+        [
+          "C",
+          2,
+          "opposite",
+          0.1,
+          79
+        ],
+        [
+          "A",
+          1,
+          "opposite",
+          0.1,
+          97
+        ],
+        [
+          "A",
+          1,
+          "opposite",
+          0.1,
+          97
+        ],
+        [
+          "A",
+          1,
+          "opposite",
+          0.1,
+          91
+        ]
+      ]
+    },
+    {
+      "symbol": "USDCAD",
+      "mean_oos_expR": -0.34408530862228953,
+      "fold_expR": [
+        -0.485,
+        -0.31,
+        -0.299,
+        -0.283
+      ],
+      "picks": [
+        [
+          "B",
+          1,
+          "midpoint",
+          0.05,
+          64
+        ],
+        [
+          "B",
+          1,
+          "atr",
+          0.1,
+          72
+        ],
+        [
+          "A",
+          3,
+          "rr",
+          0.1,
+          73
+        ],
+        [
+          "D",
+          3,
+          "rr",
+          0.05,
+          30
+        ]
+      ]
+    },
+    {
+      "symbol": "XAUUSD",
+      "mean_oos_expR": 0.0766746982619723,
+      "fold_expR": [
+        -0.226,
+        0.261,
+        0.145,
+        0.126
+      ],
+      "picks": [
+        [
+          "D",
+          3,
+          "rr",
+          0.05,
+          26
+        ],
+        [
+          "D",
+          2,
+          "midpoint",
+          0.1,
+          54
+        ],
+        [
+          "D",
+          2,
+          "midpoint",
+          0.1,
+          55
+        ],
+        [
+          "D",
+          2,
+          "opposite",
+          0.1,
+          48
+        ]
+      ]
+    }
+  ],
+  "monte_carlo": [
+    {
+      "config": "EURUSD M15 wickC e2 opposite buf0.05",
+      "n": 400,
+      "p_profit": 51.5,
+      "net_median": 1.9,
+      "net_p5": -57.9,
+      "net_p95": 175.0,
+      "maxdd_median": 45.0,
+      "maxdd_p95": 68.3
+    },
+    {
+      "config": "XAUUSD M15 wickD e3 opposite buf0.05",
+      "n": 155,
+      "p_profit": 60.8,
+      "net_median": 8.1,
+      "net_p5": -31.1,
+      "net_p95": 79.8,
+      "maxdd_median": 22.8,
+      "maxdd_p95": 39.6
+    },
+    {
+      "config": "USDJPY M15 wickD e3 opposite buf0.05",
+      "n": 173,
+      "p_profit": 91.3,
+      "net_median": 55.6,
+      "net_p5": -8.3,
+      "net_p95": 179.3,
+      "maxdd_median": 18.3,
+      "maxdd_p95": 31.5
+    },
+    {
+      "config": "AUDUSD M15 wickA e2 opposite buf0.15",
+      "n": 484,
+      "p_profit": 82.2,
+      "net_median": 97.3,
+      "net_p5": -40.2,
+      "net_p95": 594.1,
+      "maxdd_median": 42.7,
+      "maxdd_p95": 65.5
+    },
+    {
+      "config": "GBPUSD M5 wickB e3 opposite buf0.05",
+      "n": 110,
+      "p_profit": 89.1,
+      "net_median": 65.5,
+      "net_p5": -14.0,
+      "net_p95": 246.9,
+      "maxdd_median": 21.7,
+      "maxdd_p95": 37.9
+    },
+    {
+      "config": "USDCAD M5 wickA e3 opposite buf0.20",
+      "n": 127,
+      "p_profit": 59.0,
+      "net_median": 10.2,
+      "net_p5": -43.3,
+      "net_p95": 134.8,
+      "maxdd_median": 32.5,
+      "maxdd_p95": 53.4
+    }
+  ],
+  "sensitivity": [
+    {
+      "buffer_pct": 0.05,
+      "expR": 1.0249435377506206,
+      "pf": 2.247565792331412,
+      "net": 150.92231640807273,
+      "trades": 99
+    },
+    {
+      "buffer_pct": 0.1,
+      "expR": 0.7174792245395146,
+      "pf": 1.685219697576882,
+      "net": 95.68027581259318,
+      "trades": 106
+    },
+    {
+      "buffer_pct": 0.15,
+      "expR": 0.174654930492127,
+      "pf": 1.120562738282135,
+      "net": 14.152166631001672,
+      "trades": 114
+    },
+    {
+      "buffer_pct": 0.2,
+      "expR": 0.3986213751579164,
+      "pf": 1.3749872756041412,
+      "net": 48.54368847544595,
+      "trades": 119
+    }
+  ],
+  "pooled_wf_expR": -0.017916666666666674
+}
