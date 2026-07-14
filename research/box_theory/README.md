@@ -29,6 +29,8 @@ samples. Also not recommended. See `sneaky_*` modules and report Part II.
 | 7b. Sneaky analysis | `... -m box_theory.sneaky_analyze` | console summary |
 | 7c. Sneaky robustness | `... -m box_theory.sneaky_robustness` | `results/sneaky_robustness.json` |
 | 8. Report + charts (both) | `... -m box_theory.report` | `report/` |
+| 9a. Forensic labeling | `... -m box_theory.forensics` | `results/forensics_*` |
+| 9b. Forensic report | `... -m box_theory.forensics_report` | `report/FORENSICS_REPORT.md` |
 
 > `data/`, `results/master_results.csv`, and `.venv/` are gitignored (heavy /
 > reproducible). The `report/` and small evidence tables are committed.
@@ -51,4 +53,7 @@ in the `xauusd-bot` container via a read-only IPC session. Data depth: M15/M30/D
 Box Theory: `config` · `load` · `boxes` · `wick` · `engine` · `metrics` ·
 `conditions` · `sweep` · `analyze_sweep` · `robustness`.
 Sneaky Pivot: `levels` · `sneaky_engine` · `sneaky_sweep` · `sneaky_analyze` ·
-`sneaky_robustness`. Shared: `report` · `export_data` · `tests/`.
+`sneaky_robustness`. Forensics: `forensics` · `forensics_report`
+([`report/FORENSICS_REPORT.md`](report/FORENSICS_REPORT.md) — trade-level root-cause
+of wins/losses, filter feasibility, hidden-edge stats). Shared: `report` ·
+`export_data` · `tests/`.
