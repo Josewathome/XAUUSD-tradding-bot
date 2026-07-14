@@ -145,6 +145,11 @@ def run_sneaky(df: pd.DataFrame, levels: dict, symbol: str, params: dict,
             "ret_frac": ret, "pnl_usd": pnl, "equity_before": eb, "equity_after": equity,
             "duration_min": (ttime[idx] - p["etime"]).total_seconds() / 60.0,
             "exit_reason": reason, "entry_session": p["sess"], "trading_day": p["day"],
+            "entry_idx": p["idx"], "exit_idx": idx,
+            "level_type": p.get("ltype"), "level_price": p.get("lvl_price"),
+            "bar_in_day": p.get("bar_in_day"),
+            "box_height": p["lv"].height, "mid": p["lv"].mid,
+            "rh": p["lv"].rh, "rl": p["lv"].rl, "sh": p["lv"].sh, "sl_lvl": p["lv"].sl,
         })
 
     for i in range(n):
@@ -183,6 +188,8 @@ def run_sneaky(df: pd.DataFrame, levels: dict, symbol: str, params: dict,
             if broke:
                 p = open_pos(side, trig, pending["rej_low"], pending["rej_high"], lv, i)
                 if p is not None:
+                    p["ltype"] = pending["ltype"]; p["lvl_price"] = pending["lvl_price"]
+                    p["bar_in_day"] = pending["bar_in_day"]
                     pos = p; traded_today = True
                 pending = None
             else:
@@ -195,21 +202,25 @@ def run_sneaky(df: pd.DataFrame, levels: dict, symbol: str, params: dict,
             if open_ok[i]:
                 buys, sells = buy_sell_levels(lv)
                 side = None
+                lvl_price = None
                 # nearest buy level reached?
                 for L in buys:
                     if l[i] <= L + buf * H and l[i] >= L - 4 * buf * H:
-                        side = "buy"; break
+                        side = "buy"; lvl_price = L; break
                 if side is None:
                     for L in sells:
                         if h[i] >= L - buf * H and h[i] <= L + 4 * buf * H:
-                            side = "sell"; break
+                            side = "sell"; lvl_price = L; break
                 if side is not None:
                     # not in the noise zone around the range midpoint
                     if abs(c[i] - lv.mid) >= midband * H:
                         if is_john_wick(o[i], h[i], l[i], c[i], side, wick, pdl=lv.rl, pdh=lv.rh):
+                            ltype = "range" if lvl_price in (lv.rl, lv.rh) else "swing"
                             pending = {"side": side,
                                        "trigger": h[i] if side == "buy" else l[i],
-                                       "rej_low": l[i], "rej_high": h[i], "bars": entry_valid}
+                                       "rej_low": l[i], "rej_high": h[i], "bars": entry_valid,
+                                       "lvl_price": lvl_price, "ltype": ltype,
+                                       "bar_in_day": bar_in_day}
 
     if pos is not None:
         close_pos(pos, c[n - 1], n - 1, "end_of_data")

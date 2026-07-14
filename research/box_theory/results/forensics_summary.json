@@ -1,0 +1,381 @@
+{
+  "base": {
+    "n": 2498,
+    "wr": 20.416333066453163,
+    "pf": 1.0526394714557243,
+    "exp": 0.04784264101637244,
+    "dd": 91.25633360438154,
+    "net": 4.44543971082636
+  },
+  "n_trades": 2498,
+  "wins": 510,
+  "losses": 1988,
+  "loss_causes": {
+    "other": {
+      "n": 505,
+      "pct": 25.4,
+      "avg_r": -1.162
+    },
+    "false_rejection_whipsaw": {
+      "n": 342,
+      "pct": 17.2,
+      "avg_r": -1.171
+    },
+    "breakout_through_level": {
+      "n": 323,
+      "pct": 16.2,
+      "avg_r": -1.13
+    },
+    "strong_trend_continuation": {
+      "n": 296,
+      "pct": 14.9,
+      "avg_r": -1.141
+    },
+    "low_liquidity_chop": {
+      "n": 293,
+      "pct": 14.7,
+      "avg_r": -1.161
+    },
+    "volatility_spike_news": {
+      "n": 117,
+      "pct": 5.9,
+      "avg_r": -1.102
+    },
+    "gap_and_go": {
+      "n": 68,
+      "pct": 3.4,
+      "avg_r": -1.159
+    },
+    "target_too_far_timedecay": {
+      "n": 44,
+      "pct": 2.2,
+      "avg_r": -0.735
+    }
+  },
+  "loss_conditions": {
+    "trend_against(adx>=25)": 26.8,
+    "level_broken": 42.5,
+    "day_closed_against(>=0.5R)": 55.3,
+    "vol_expansion(>=1.8)": 11.0,
+    "gap(>0.25H)": 6.9,
+    "never_went_our_way(mfe<0.5R)": 36.7,
+    "asian_session": 40.0,
+    "time_exit": 2.9
+  },
+  "win_vs_loss": {
+    "bar_in_day": {
+      "win_mean": 38.512,
+      "loss_mean": 27.729,
+      "cohen_d": 0.411
+    },
+    "atr_pct": {
+      "win_mean": 0.562,
+      "loss_mean": 0.468,
+      "cohen_d": 0.312
+    },
+    "atr_expansion": {
+      "win_mean": 1.231,
+      "loss_mean": 1.103,
+      "cohen_d": 0.216
+    },
+    "dist_to_target_R": {
+      "win_mean": 9.934,
+      "loss_mean": 11.039,
+      "cohen_d": -0.2
+    },
+    "gap_H": {
+      "win_mean": -0.056,
+      "loss_mean": -0.041,
+      "cohen_d": -0.096
+    },
+    "adx_d1": {
+      "win_mean": 26.391,
+      "loss_mean": 25.255,
+      "cohen_d": 0.089
+    },
+    "dist_level_mid_H": {
+      "win_mean": 0.526,
+      "loss_mean": 0.52,
+      "cohen_d": 0.061
+    },
+    "r_unit_atr": {
+      "win_mean": 1.238,
+      "loss_mean": 1.204,
+      "cohen_d": 0.06
+    },
+    "utc_hour": {
+      "win_mean": 12.057,
+      "loss_mean": 11.709,
+      "cohen_d": 0.042
+    },
+    "against_fade": {
+      "win_mean": 0.59,
+      "loss_mean": 0.609,
+      "cohen_d": -0.038
+    },
+    "or_size_H": {
+      "win_mean": 0.131,
+      "loss_mean": 0.133,
+      "cohen_d": -0.026
+    },
+    "box_height_atr": {
+      "win_mean": 0.984,
+      "loss_mean": 0.975,
+      "cohen_d": 0.024
+    }
+  },
+  "by_category": {
+    "level_type": {
+      "range": {
+        "n": 2370,
+        "wr": 19.9,
+        "expR": 0.048
+      },
+      "swing": {
+        "n": 128,
+        "wr": 29.7,
+        "expR": 0.036
+      }
+    },
+    "session": {
+      "ASIAN": {
+        "n": 972,
+        "wr": 18.2,
+        "expR": 0.121
+      },
+      "LONDON": {
+        "n": 336,
+        "wr": 16.7,
+        "expR": -0.217
+      },
+      "NEWYORK": {
+        "n": 447,
+        "wr": 37.1,
+        "expR": 0.005
+      },
+      "OFF": {
+        "n": 743,
+        "wr": 14.9,
+        "expR": 0.097
+      }
+    },
+    "symbol": {
+      "AUDUSD": {
+        "n": 439,
+        "wr": 22.8,
+        "expR": 0.216
+      },
+      "EURUSD": {
+        "n": 430,
+        "wr": 19.3,
+        "expR": 0.083
+      },
+      "GBPUSD": {
+        "n": 430,
+        "wr": 17.9,
+        "expR": 0.003
+      },
+      "USDCAD": {
+        "n": 346,
+        "wr": 16.2,
+        "expR": -0.3
+      },
+      "USDJPY": {
+        "n": 432,
+        "wr": 22.9,
+        "expR": 0.089
+      },
+      "XAUUSD": {
+        "n": 421,
+        "wr": 22.6,
+        "expR": 0.126
+      }
+    },
+    "against_fade": {
+      "0": {
+        "n": 987,
+        "wr": 21.2,
+        "expR": 0.003
+      },
+      "1": {
+        "n": 1511,
+        "wr": 19.9,
+        "expR": 0.077
+      }
+    }
+  },
+  "drivers_corr": {
+    "level_broken": {
+      "corr_win": -0.124,
+      "corr_r": -0.12
+    },
+    "r_unit_atr": {
+      "corr_win": 0.026,
+      "corr_r": -0.051
+    },
+    "dist_to_target_R": {
+      "corr_win": -0.08,
+      "corr_r": 0.048
+    },
+    "adx_d1": {
+      "corr_win": 0.036,
+      "corr_r": 0.033
+    },
+    "gap_H": {
+      "corr_win": -0.041,
+      "corr_r": -0.032
+    },
+    "box_height_atr": {
+      "corr_win": 0.012,
+      "corr_r": -0.026
+    },
+    "bar_in_day": {
+      "corr_win": 0.164,
+      "corr_r": -0.022
+    },
+    "against_fade": {
+      "corr_win": -0.015,
+      "corr_r": 0.012
+    },
+    "atr_expansion": {
+      "corr_win": 0.086,
+      "corr_r": 0.01
+    },
+    "atr_pct": {
+      "corr_win": 0.124,
+      "corr_r": -0.007
+    },
+    "dist_level_mid_H": {
+      "corr_win": 0.021,
+      "corr_r": -0.006
+    },
+    "utc_hour": {
+      "corr_win": 0.017,
+      "corr_r": -0.002
+    },
+    "or_size_H": {
+      "corr_win": -0.011,
+      "corr_r": 0.0
+    }
+  },
+  "logit_coef": {
+    "level_broken": -0.522,
+    "bar_in_day": 0.406,
+    "atr_pct": 0.354,
+    "r_unit_atr": 0.311,
+    "box_height_atr": -0.171,
+    "dist_to_target_R": 0.166,
+    "gap_H": -0.1,
+    "adx_d1": 0.091,
+    "atr_expansion": 0.078,
+    "or_size_H": -0.011,
+    "dist_level_mid_H": -0.01,
+    "utc_hour": 0.007,
+    "against_fade": 0.0
+  },
+  "gb_importance": {
+    "bar_in_day": 0.163,
+    "dist_to_target_R": 0.108,
+    "r_unit_atr": 0.104,
+    "atr_expansion": 0.102,
+    "atr_pct": 0.101,
+    "adx_d1": 0.098,
+    "box_height_atr": 0.078,
+    "level_broken": 0.076,
+    "gap_H": 0.071,
+    "or_size_H": 0.057,
+    "dist_level_mid_H": 0.019,
+    "utc_hour": 0.019,
+    "against_fade": 0.003
+  },
+  "filters": {
+    "skip trend-against (adx>=25 & against)": {
+      "removed": 677,
+      "losses_removed": 533,
+      "wins_removed": 144,
+      "wr": 20.1,
+      "pf": 1.04,
+      "exp": 0.041,
+      "dd": 92.5,
+      "net": -9.9,
+      "n": 1821
+    },
+    "skip vol spike (atr_exp>=1.8)": {
+      "removed": 309,
+      "losses_removed": 218,
+      "wins_removed": 91,
+      "wr": 19.1,
+      "pf": 1.0,
+      "exp": 0.003,
+      "dd": 93.5,
+      "net": -60.9,
+      "n": 2189
+    },
+    "skip Asian session": {
+      "removed": 972,
+      "losses_removed": 795,
+      "wins_removed": 177,
+      "wr": 21.8,
+      "pf": 1.0,
+      "exp": 0.001,
+      "dd": 87.7,
+      "net": -49.2,
+      "n": 1526
+    },
+    "skip tiny stop (r_unit_atr<0.4)": {
+      "removed": 9,
+      "losses_removed": 7,
+      "wins_removed": 2,
+      "wr": 20.4,
+      "pf": 1.05,
+      "exp": 0.048,
+      "dd": 90.3,
+      "net": 4.0,
+      "n": 2489
+    },
+    "skip wide box (top quartile)": {
+      "removed": 625,
+      "losses_removed": 492,
+      "wins_removed": 133,
+      "wr": 20.1,
+      "pf": 1.09,
+      "exp": 0.085,
+      "dd": 88.0,
+      "net": 99.1,
+      "n": 1873
+    },
+    "skip gap days (|gap|>0.25H)": {
+      "removed": 177,
+      "losses_removed": 138,
+      "wins_removed": 39,
+      "wr": 20.3,
+      "pf": 1.07,
+      "exp": 0.061,
+      "dd": 91.0,
+      "net": 37.5,
+      "n": 2321
+    },
+    "trade SWING levels only": {
+      "removed": 2370,
+      "losses_removed": 1898,
+      "wins_removed": 472,
+      "wr": 29.7,
+      "pf": 1.05,
+      "exp": 0.036,
+      "dd": 28.3,
+      "net": 0.2,
+      "n": 128
+    },
+    "trade NEWYORK only": {
+      "removed": 2051,
+      "losses_removed": 1707,
+      "wins_removed": 344,
+      "wr": 37.1,
+      "pf": 1.01,
+      "exp": 0.005,
+      "dd": 50.5,
+      "net": -7.5,
+      "n": 447
+    }
+  }
+}
