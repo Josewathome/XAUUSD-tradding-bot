@@ -29,3 +29,9 @@ backtest_*.txt
 /logs
 .claude
 /.claude
+
+# ── Box Theory research module: commit code, ignore data/outputs/venv ──
+research/box_theory/.venv/
+research/box_theory/data/
+research/box_theory/results/
+research/box_theory/report/
