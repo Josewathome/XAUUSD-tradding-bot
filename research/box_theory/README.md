@@ -4,10 +4,16 @@ Standalone quantitative research module that tests the **"Box Theory"** strategy
 (fade the previous day's High/Low on a "John Wick" rejection candle) on 6 FX/metal
 pairs. It is **independent of the live execution framework** and does not modify it.
 
-**Verdict: the theory is rejected** — no robust, tradeable edge. Full write-up in
+**Verdict: rejected** — no robust, tradeable edge. Full write-up in
 [`report/BOX_THEORY_REPORT.md`](report/BOX_THEORY_REPORT.md). Headline: the core
 "reverses at PDH/PDL" premise is a coin flip (~50%), 87% of 16,128 configurations
 lose money, and walk-forward selection pools to ≈0 R.
+
+**Part II — the "Sneaky Pivot"** (the fuller variant: swing levels beyond the range,
+a session-open 3-candle entry, opposite-side target) was also tested across 48,384
+configs. It is a genuine improvement (30% of configs profitable, near break-even) but
+still fails walk-forward (pools to −0.05 R) with per-pair winners on 30–60 trade
+samples. Also not recommended. See `sneaky_*` modules and report Part II.
 
 ## Pipeline
 
@@ -19,7 +25,10 @@ lose money, and walk-forward selection pools to ≈0 R.
 | 4. Full sweep | `... -m box_theory.sweep` | `results/master_results.csv` |
 | 5. Sweep analysis | `... -m box_theory.analyze_sweep` | console summary |
 | 6. Robustness | `... -m box_theory.robustness` | `results/robustness.json` |
-| 7. Report + charts | `... -m box_theory.report` | `report/` |
+| 7a. Sneaky Pivot sweep | `... -m box_theory.sneaky_sweep` | `results/sneaky_master.csv` |
+| 7b. Sneaky analysis | `... -m box_theory.sneaky_analyze` | console summary |
+| 7c. Sneaky robustness | `... -m box_theory.sneaky_robustness` | `results/sneaky_robustness.json` |
+| 8. Report + charts (both) | `... -m box_theory.report` | `report/` |
 
 > `data/`, `results/master_results.csv`, and `.venv/` are gitignored (heavy /
 > reproducible). The `report/` and small evidence tables are committed.
@@ -39,5 +48,7 @@ in the `xauusd-bot` container via a read-only IPC session. Data depth: M15/M30/D
   flat overnight. A seeded random-entry control confirms the harness adds no edge.
 
 ## Files
-`config` · `load` · `boxes` · `wick` · `engine` · `metrics` · `conditions` ·
-`sweep` · `analyze_sweep` · `robustness` · `report` · `export_data` · `tests/`.
+Box Theory: `config` · `load` · `boxes` · `wick` · `engine` · `metrics` ·
+`conditions` · `sweep` · `analyze_sweep` · `robustness`.
+Sneaky Pivot: `levels` · `sneaky_engine` · `sneaky_sweep` · `sneaky_analyze` ·
+`sneaky_robustness`. Shared: `report` · `export_data` · `tests/`.
