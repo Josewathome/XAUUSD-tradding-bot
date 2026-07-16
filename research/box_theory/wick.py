@@ -31,6 +31,8 @@ def is_john_wick(o, h, l, c, side, variation, pdl=None, pdh=None) -> bool:
     body, rng, upper, lower = _parts(o, h, l, c)
     if rng <= 0:
         return False
+    if variation == "ANY":       # ablation control: accept every touch, no wick test
+        return True
     rel = lower if side == "buy" else upper  # rejection wick for this direction
     ratio = rel / max(body, _EPS)
 
