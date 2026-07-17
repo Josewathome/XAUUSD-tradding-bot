@@ -403,9 +403,20 @@ def main():
     if not mt5.initialize(timeout=20000):
         print("FATAL mt5.initialize: %s" % str(mt5.last_error()))
         sys.exit(1)
+    ti = mt5.terminal_info()
+    if ti is None or not ti.connected:
+        print("terminal not connected — skipping tick"); mt5.shutdown(); return
     now = server_now()
     if now is None:
         print("no server time (market closed?)"); mt5.shutdown(); return
+    # stale-quote guard: server (UK+2) vs host UTC differ by a stable offset;
+    # if the freshest tick is >30min behind that expectation, do not act.
+    host_utc = dt.datetime.utcnow()
+    expect = host_utc + dt.timedelta(hours=3)   # summer UK+2 = UTC+3 (winter +2)
+    lag_min = (expect - now).total_seconds() / 60.0
+    if lag_min > 90:                            # tolerant of the DST-mismatch hour
+        print("stale quotes (lag %.0f min) — skipping tick" % lag_min)
+        mt5.shutdown(); return
     state = load_state()
     for pair in PAIRS:
         st = state.get(pair, {})
