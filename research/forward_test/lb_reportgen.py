@@ -268,6 +268,16 @@ def main():
         send_alert("[LB forward test] %d alert(s) — status %s" % (len(alerts), v),
                    "\n".join(alerts) + "\n\nSee reports/STATUS.md")
 
+    # Decision Dashboard (deliverable D): regenerate and embed
+    dash_text = ""
+    try:
+        import subprocess
+        dash_text = subprocess.run(
+            [sys.executable, os.path.join(BASE, "lb_dashboard.py")],
+            capture_output=True, text=True, timeout=300).stdout
+    except Exception as exc:
+        dash_text = "dashboard failed: %r" % exc
+
     md = ["# London Breakout forward test — %s report (%s)\n" % (mode, today)]
     md.append("**Status: %s** — %s\n" % (v, "; ".join(notes)))
     if alerts:
@@ -300,6 +310,20 @@ def main():
                               "slippage_pips", "exit_reason"]].to_string(index=False))
         out = os.path.join(REPORTS, "daily_%s.md" % today)
     elif mode == "weekly":
+        md.append("\n## Signal funnel since trading start (%s)\n" % TRADING_START)
+        if len(E):
+            E2 = E[E.t_utc >= pd.Timestamp(TRADING_START)]
+            funnel = {k: int((E2.event == k).sum()) for k in
+                      ["range_set", "order_placed", "filled",
+                       "order_expired_or_cancelled", "order_cancelled",
+                       "spread_block", "order_send_FAILED",
+                       "placement_blocked_existing", "tick_ERROR"]}
+            md.append("```\n%s\n```\n" % json.dumps(funnel, indent=1))
+            missed = E2[E2.event == "order_send_FAILED"]
+            n_missed = int((missed.get("outcome") == "missed_fast_move").sum()) \
+                if len(missed) and "outcome" in missed.columns else 0
+            md.append("Missed fast-moves (conservative losses of the experiment, "
+                      "not the strategy): %d\n" % n_missed)
         md.append("\n## This week's trades\n")
         if len(T):
             wk = T[T.exit_time >= pd.Timestamp(dt.date.today() - dt.timedelta(days=7))]
@@ -315,6 +339,7 @@ def main():
     else:
         out = os.path.join(REPORTS, "STATUS.md")
 
+    md.append("\n" + dash_text)
     with open(out, "w") as f:
         f.write("\n".join(md))
     # always refresh STATUS.md too
