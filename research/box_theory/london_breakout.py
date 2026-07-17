@@ -63,13 +63,22 @@ def adr20(sym):
     return dict(zip(d1.day, rng))
 
 
-def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
+def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01,
+        asia_end=9, win_end=13, pad_pips=PIP_PAD, expiry_min=30,
+        body_close=True, use_stop_order=True, use_expiry=True,
+        cost_mult=1.0, slip_pips=0.0):
+    """Adversarial-validation parameters (defaults = the faithful spec):
+    asia_end/win_end are SERVER hours (UK+2); pad_pips = stop offset;
+    expiry_min = pending-order lifetime; body_close=False accepts wick pierces;
+    use_stop_order=False enters at the signal close; use_expiry=False keeps the
+    order alive to window end; cost_mult/slip_pips stress transaction costs."""
     df = load(sym, tf)
     spec = config.SYMBOL_SPEC[sym]
     pip = spec["pip_size"]
-    cost = spec["cost_price"]
-    pad = PIP_PAD * pip
-    order_bars = ORDER_BARS_M5 if tf == "M5" else 2
+    cost = spec["cost_price"] * cost_mult + slip_pips * pip
+    pad = pad_pips * pip
+    bar_min = {"M5": 5, "M15": 15, "M30": 30}[tf]
+    order_bars = max(1, int(expiry_min // bar_min))
     adr = adr20(sym)
     point = pip / 10.0 if spec["digits"] in (3, 5) else pip  # spread pts -> price
 
@@ -94,9 +103,10 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
         idx = np.arange(i, j)
         i = j
         funnel["days"] += 1
-        asia = idx[(hours[idx] >= ASIA_H[0]) & (hours[idx] < ASIA_H[1])]
-        win = idx[(hours[idx] >= WIN_H[0]) & (hours[idx] < WIN_H[1])]
-        if len(asia) < (50 if tf == "M5" else 16) or len(win) < 4:
+        asia = idx[(hours[idx] >= ASIA_H[0]) & (hours[idx] < asia_end)]
+        win = idx[(hours[idx] >= asia_end) & (hours[idx] < win_end)]
+        min_asia = int(0.7 * (asia_end - ASIA_H[0]) * 60 / bar_min)
+        if len(asia) < min_asia or len(win) < 2:
             continue
         ah = h[asia].max(); al = l[asia].min()
         rng = ah - al
@@ -108,14 +118,20 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
                 continue
         funnel["range_ok"] += 1
 
-        # find first body close outside range within window
+        # find first signal within window: body close outside range (faithful),
+        # or any wick pierce when the body-close rule is ablated
         sig = None
         for k in win:
-            body_hi = max(o[k], c[k]); body_lo = min(o[k], c[k])
-            if c[k] > ah and body_hi > ah:
-                sig = (k, "buy"); break
-            if c[k] < al and body_lo < al:
-                sig = (k, "sell"); break
+            if body_close:
+                if c[k] > ah:
+                    sig = (k, "buy"); break
+                if c[k] < al:
+                    sig = (k, "sell"); break
+            else:
+                if h[k] > ah:
+                    sig = (k, "buy"); break
+                if l[k] < al:
+                    sig = (k, "sell"); break
         if sig is None:
             continue
         funnel["breakout"] += 1
@@ -133,9 +149,11 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
         fill_price = None
         last_win_bar = win[-1]
         kk = k0
-        expiry = k0 + order_bars
+        expiry = (k0 + order_bars) if use_expiry else last_win_bar
         dead = None
-        while True:
+        if not use_stop_order:          # ablation: market entry at signal close
+            fill_idx, fill_price = k0, c[k0]
+        while fill_idx is None:
             kk += 1
             if kk >= j or kk > last_win_bar:
                 dead = "expired"; break
@@ -153,7 +171,8 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
                 retr = ((bo_ext - l[kk]) / leg) if side == "buy" else ((h[kk] - bo_ext) / leg)
                 if 0.786 <= retr <= 0.886:
                     trigger = (h[kk] + pad) if side == "buy" else (l[kk] - pad)
-                    expiry = kk + order_bars   # re-arm the 30-min clock on the new order
+                    if use_expiry:
+                        expiry = kk + order_bars   # re-arm the clock on the new order
         if fill_idx is None:
             funnel[dead] += 1
             continue
@@ -171,21 +190,16 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
         tp = fill_price + dirn * tp_r * r_unit
 
         exit_price = None; reason = None
+        mfe = 0.0
         for m in range(fill_idx, j):
-            if m > fill_idx or True:
-                hit_sl = (l[m] <= slp) if side == "buy" else (h[m] >= slp)
-                hit_tp = (h[m] >= tp) if side == "buy" else (l[m] <= tp)
-                if m == fill_idx:
-                    # same-bar: pessimistic SL first (we filled intra-bar)
-                    if hit_sl:
-                        exit_price, reason = slp, "stop_loss"; break
-                    if hit_tp:
-                        exit_price, reason = tp, "take_profit"; break
-                else:
-                    if hit_sl:
-                        exit_price, reason = slp, "stop_loss"; break
-                    if hit_tp:
-                        exit_price, reason = tp, "take_profit"; break
+            fav = (h[m] - fill_price) if side == "buy" else (fill_price - l[m])
+            mfe = max(mfe, fav)
+            hit_sl = (l[m] <= slp) if side == "buy" else (h[m] >= slp)
+            hit_tp = (h[m] >= tp) if side == "buy" else (l[m] <= tp)
+            if hit_sl:      # pessimistic: SL first on ties (incl. fill bar)
+                exit_price, reason = slp, "stop_loss"; break
+            if hit_tp:
+                exit_price, reason = tp, "take_profit"; break
         if exit_price is None:
             exit_price, reason = c[j - 1], "eod"
         gross = (exit_price - fill_price) * dirn
@@ -195,7 +209,9 @@ def run(sym, tf="M5", sl_type="opposite", adr_filter=True, tp_r=2.0, risk=0.01):
         trades.append({"symbol": sym, "day": d, "side": side, "entry": fill_price,
                        "sl": slp, "tp": tp, "exit": exit_price, "r_net": rnet,
                        "reason": reason, "equity_after": equity,
-                       "asian_range_pips": rng / pip})
+                       "asian_range_pips": rng / pip,
+                       "mfe_r": mfe / r_unit, "fill_hour": int(hours[fill_idx]),
+                       "r_unit_pips": r_unit / pip})
     return pd.DataFrame(trades), funnel, equity
 
 
