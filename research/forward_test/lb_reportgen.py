@@ -13,6 +13,8 @@ import sys
 import datetime as dt
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +30,8 @@ CRITERIA = {
     "alive_pf": 1.10, "alive_exp": 0.05, "slip_assumption_pips": 1.0,
     "reject_exp": 0.0, "reject_pf": 1.00, "slip_reject_pips": 2.0,
 }
-START_DATE = "2026-07-17"
+START_DATE = "2026-07-17"          # framework armed (QA tracer trades before trading start)
+TRADING_START = "2026-07-20"       # metrics count trades from HERE; accounting counts ALL
 
 
 def load():
@@ -47,6 +50,10 @@ def load():
 
 
 def metrics(T):
+    # metrics use only official-experiment trades; QA tracer trades (pre
+    # TRADING_START) remain in trades.csv for accounting/reconciliation
+    if len(T):
+        T = T[pd.to_datetime(T.entry_time) >= pd.Timestamp(TRADING_START)]
     if len(T) == 0:
         return {"n": 0}
     r = T.r_multiple.to_numpy(dtype=float)
@@ -54,7 +61,7 @@ def metrics(T):
     eq = 1.0; peak = 1.0; mdd = 0.0
     for x in r:
         eq *= (1 + 0.01 * x); peak = max(peak, eq); mdd = max(mdd, (peak - eq) / peak)
-    months = max(0.03, (dt.date.today() - dt.date.fromisoformat(START_DATE)).days / 30.44)
+    months = max(0.03, (dt.date.today() - dt.date.fromisoformat(TRADING_START)).days / 30.44)
     return {"n": len(r), "wr": 100 * (r > 0).mean(),
             "pf": gp / gl if gl > 0 else float("inf"),
             "exp": float(r.mean()), "mdd": 100 * mdd, "months": months,
@@ -208,9 +215,29 @@ def main():
     m = metrics(T)
     v, notes = verdict(m)
     rec_ok, rec_lines = broker_reconcile(T)
-    if v == "ALIVE (GO)" and not rec_ok:
+    try:
+        from lb_accounting import check as conservation_check
+        cons_ok, cons_text = conservation_check()
+    except Exception as exc:
+        cons_ok, cons_text = False, "accounting check failed to run: %r" % exc
+    if v == "ALIVE (GO)" and not (rec_ok and cons_ok):
         v = "RUNNING"
-        notes = ["success criteria met BUT broker reconciliation failed — resolve first"]
+        notes = ["success criteria met BUT integrity checks failed (reconcile=%s, conservation=%s)"
+                 % (rec_ok, cons_ok)]
+    # stuck-position alert: an open position older than 2 days means the
+    # runner is failing to close/record it
+    stuck = []
+    sp = os.path.join(DATA, "state.json")
+    if os.path.exists(sp):
+        try:
+            Sj = json.load(open(sp))
+            for pr, sst in Sj.items():
+                if isinstance(sst, dict) and sst.get("position_ticket") and sst.get("phase") != "DONE":
+                    ft = sst.get("fill_time")
+                    if ft and (dt.datetime.utcnow() - dt.datetime.fromisoformat(ft)).days >= 2:
+                        stuck.append("%s position %s open since %s" % (pr, sst["position_ticket"], ft))
+        except Exception:
+            pass
     today = dt.date.today().isoformat()
 
     # ── liveness + integrity alerting (F18) ──
@@ -222,6 +249,9 @@ def main():
                       ("missing" if hb is None else "%.0f" % hb))
     if not rec_ok and len(T) > 0:
         alerts.append("broker reconciliation FAILED: " + " | ".join(rec_lines))
+    if not cons_ok:
+        alerts.append("signal-conservation FAILED — see accounting section")
+    alerts.extend(stuck)
     if len(E):
         recent = E[E.t_utc >= pd.Timestamp(dt.datetime.utcnow() - dt.timedelta(days=1))]
         fails = recent[recent.event.isin(["order_send_FAILED", "tick_ERROR",
@@ -244,6 +274,8 @@ def main():
         md.append("\n> **ALERTS:** " + " · ".join(alerts) + "\n")
     md.append("\n## Broker-truth reconciliation (%s)\n" % ("OK" if rec_ok else "FAILED"))
     md.append("```\n%s\n```\n" % "\n".join(rec_lines))
+    md.append("\n## Signal conservation (%s)\n" % ("OK" if cons_ok else "FAILED"))
+    md.append("```\n%s```\n" % cons_text)
     md.append("Experiment start: %s · pre-registered criteria: >=%d trades, >=%.0f months, "
               "PF>%.2f, exp>%+0.2fR, |slip|<=%.1fp. Reject: exp<=0 or PF<1.00 after %d trades, "
               "or rolling-20 |slip|>%.1fp.\n" % (
@@ -265,7 +297,7 @@ def main():
             if len(td):
                 md.append("\n## Trades closed today\n")
                 md.append(td[["pair", "direction", "entry_time", "exit_time", "r_multiple",
-                              "slippage_pips", "exit_reason"]].to_markdown(index=False))
+                              "slippage_pips", "exit_reason"]].to_string(index=False))
         out = os.path.join(REPORTS, "daily_%s.md" % today)
     elif mode == "weekly":
         md.append("\n## This week's trades\n")
@@ -276,7 +308,7 @@ def main():
                 md.append("n=%d  WR=%.1f%%  exp=%+.3fR  PF=%.2f  avg|slip|=%.2fp\n" % (
                     mw["n"], mw["wr"], mw["exp"], mw["pf"], mw["slip"]))
                 md.append(wk[["pair", "date", "direction", "r_multiple", "slippage_pips",
-                              "spread_signal_pips", "exit_reason"]].to_markdown(index=False))
+                              "spread_signal_pips", "exit_reason"]].to_string(index=False))
             else:
                 md.append("_No trades closed this week._")
         out = os.path.join(REPORTS, "weekly_%s.md" % today)

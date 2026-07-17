@@ -109,12 +109,19 @@ def event(pair, kind, **kw):
 
 
 def append_trade(row):
+    # idempotency guard: a position may never be recorded twice, even across
+    # crashes between the CSV append and the state save
+    if os.path.exists(TRADES_F) and row.get("position_ticket"):
+        with open(TRADES_F) as f:
+            if ("," + str(row["position_ticket"]) + ",") in f.read():
+                return False
     new = not os.path.exists(TRADES_F)
     with open(TRADES_F, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=TRADE_COLS)
         if new:
             w.writeheader()
         w.writerow(row)
+    return True
 
 
 # ── market helpers ────────────────────────────────────────────────────
@@ -192,6 +199,9 @@ def reconcile(pair, st, now):
     mere absence of a live position would silently drop such trades (they are
     disproportionately fast losers -> survivorship bias -> false positive).
     """
+    if st.get("phase") == "DONE":
+        return   # day fully resolved — never touch the broker or re-record
+
     # pending order → filled / expired / still working?
     if st.get("order_ticket") and not st.get("position_ticket"):
         ticket = int(st["order_ticket"])
@@ -202,7 +212,7 @@ def reconcile(pair, st, now):
                 res = send_order({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
                 if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
                     st["phase"] = "DONE"; st["outcome"] = "expired_unfilled"
-                    event(pair, "order_cancelled", reason="soft_expiry")
+                    event(pair, "order_cancelled", ticket=ticket, reason="soft_expiry")
             return
         # order gone from the book — consult broker HISTORY before concluding
         pos_id = None
@@ -238,7 +248,8 @@ def reconcile(pair, st, now):
         st["spread_entry_pips"] = spread_pips(pair)
         slp = (fp - st["requested_entry"]) / PIP
         st["slippage_pips"] = slp if st["direction"] == "buy" else -slp
-        event(pair, "filled", price=fp, requested=st["requested_entry"],
+        event(pair, "filled", ticket=pos_id, order=ticket, price=fp,
+              requested=st["requested_entry"],
               slippage_pips=round(st["slippage_pips"], 2))
         # NO return: fall through so an already-closed position records NOW
 
@@ -458,7 +469,7 @@ def step(pair, st, now):
             res = None if DRY else send_order({"action": mt5.TRADE_ACTION_REMOVE,
                                                "order": int(st["order_ticket"])})
             if DRY or (res is not None and res.retcode == mt5.TRADE_RETCODE_DONE):
-                event(pair, "order_cancelled", reason=why)
+                event(pair, "order_cancelled", ticket=int(st["order_ticket"]), reason=why)
                 st["phase"] = "DONE"; st["outcome"] = why
             else:
                 event(pair, "order_cancel_failed_probably_filled",
@@ -496,6 +507,19 @@ def audit_dump():
                         dt.datetime.utcfromtimestamp(int(o.time_setup)).isoformat(),
                         dt.datetime.utcfromtimestamp(int(o.time_done)).isoformat()
                         if o.time_done else "", getattr(o, "position_id", "")])
+    # dated archive: if the broker ever prunes/loses account history, the
+    # daily snapshots preserve the record (Area 2 mitigation)
+    try:
+        arch = os.path.join(DATA, "audit_history")
+        if not os.path.isdir(arch):
+            os.makedirs(arch)
+        stamp = dt.datetime.utcnow().strftime("%Y%m%d")
+        for src in ("broker_deals.csv", "broker_orders.csv"):
+            with open(os.path.join(DATA, src)) as a, \
+                 open(os.path.join(arch, stamp + "_" + src), "w") as b:
+                b.write(a.read())
+    except Exception as exc:
+        print("archive copy failed: %r" % exc)
     print("audit: %d deals, %d orders dumped" % (len(deals), len(orders)))
 
 
@@ -510,6 +534,12 @@ def orphan_sweep(state, now):
             known_orders.add(int(stp["order_ticket"]))
         if stp.get("position_ticket"):
             known_pos.add(int(stp["position_ticket"]))
+    # TRACER-DRILL FIX: a position spawned by a KNOWN pending order is ours
+    # in-flight (position id == originating order ticket on this account) —
+    # adopting it would overwrite the signal metadata and destroy the slippage
+    # measurement. Leave it for reconcile(), which records fill details from
+    # the broker's entry deal.
+    known_pos |= known_orders
     for o in (mt5.orders_get() or []):
         if o.magic == MAGIC and int(o.ticket) not in known_orders:
             if not DRY:

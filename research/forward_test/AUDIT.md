@@ -72,3 +72,82 @@ live; treat slippage numbers as a lower bound; (2) min-lot quantization at
 ~$198 equity means per-trade risk sometimes exceeds 1% (recorded; R-multiples
 unaffected); (3) ~2–3 DST-mismatch weeks/year shift the window 1 h in UK terms
 (same as backtest). None of these can manufacture a passing result.
+
+---
+
+# Addendum — "Trust the Instrument" Audit (2026-07-17, second pass)
+
+Method: live tracer-bullet trade (real fill, magic 771015) driven through
+injected state, state deletion, container restart, and manual close — plus
+broker-history stress tests and a formal signal-conservation checker.
+
+## New findings (all fixed and re-verified live)
+
+| # | Severity | Finding | Proof of fix |
+|---|---|---|---|
+| G1 | **HIGH** | `orphan_sweep` adopted positions spawned by KNOWN pending orders — every normal between-tick fill would have had its state overwritten, destroying signal metadata and the slippage measurement (slippage=None on ~all trades → slippage criterion unevaluable) | Fixed (known order tickets count as known position ids); tracer re-run recorded slippage **+0.6 pips** via the history-first path |
+| G2 | **HIGH** | Post-completion ticks re-recorded the closed trade (`reconcile` ran before the DONE gate) → duplicate rows; crash between CSV-append and state-save had the same effect | DONE-guard in `reconcile` + idempotency guard in `append_trade` (position_ticket never written twice); verified: two extra live ticks after recording → still exactly 1 row. Accounting checker now treats duplicates as a hard violation |
+| G3 | MEDIUM | Daily report CRASHED whenever a trade closed that day (`to_markdown` requires missing `tabulate`) → stale STATUS on exactly the interesting days | Replaced with `to_string` + dependency installed; daily run verified with a closed trade present |
+
+## Area 1 — Disaster recovery: proof table
+
+| Scenario | Drill performed | Result |
+|---|---|---|
+| State deletion w/ pending order | real order + `rm state.json` + real tick | orphan cancelled, logged (ticket 1814424304) |
+| State corruption | garbage JSON written + real tick | backed up (`state.json.corrupt-…`), SYS event, clean re-init, alert queued |
+| Fill between ticks | tracer BUY_STOP filled while no tick ran | history-first reconcile recorded fill + slippage +0.6p |
+| State deletion w/ OPEN position | `rm state.json` + tick | position adopted (`recovered=True`), managed onward |
+| MT5/container restart w/ open position | `docker restart xauusd-bot` mid-trade | position still tracked post-restart; trade closed & recorded end-to-end |
+| VPS reboot | policy check | `unless-stopped` on all containers; crontab persists; cron autostarts |
+| Cron interruption | 6.5 h real gap earlier today + idempotent design | no-op ticks, no duplication; late signals degrade to `missed_fast_move` (conservative) |
+| Multiple simultaneous | deletion + restart chained on one live trade | full recovery; broker reconcile matched to the cent |
+
+## Area 2 — Broker history trust
+
+- History **survives terminal restart** (proven: ticket lookups + range queries
+  return pre-restart orders/deals after `docker restart`).
+- Canceled orders never create deals (proven) — QA orders cannot pollute
+  deal-based reconciliation.
+- `history_*_get` range queries use explicit from/to (no pagination in the MT5
+  Python API); our window is EXPERIMENT_START → now+2d, immune to weekend/DST
+  boundary effects.
+- Residual risk: broker-side history pruning or demo-account reset. Mitigated:
+  daily dated snapshots in `data/audit_history/` preserve every dump; the
+  append-only `trades.csv`/`events.jsonl` are independent records.
+- Broker rounds order expiration down to the whole minute (≤59 s early —
+  measured; immaterial).
+
+## Area 3 — Signal accounting
+
+State machine (every signal ends in exactly one CAPS terminal):
+```
+day ──> NO_RANGE | NO_BREAKOUT | (weekend/holiday)
+signal ──> SPREAD_BLOCK | MISSED_FAST_MOVE | ORDER_REJECTED | BLOCKED_EXISTING | placed
+placed ──> EXPIRED_UNFILLED | INVALIDATED | WINDOW_END | filled
+filled ──> TAKE_PROFIT | STOP_LOSS | MANUAL_OR_EOD  (exactly one trades.csv row)
+(adopted positions enter at `filled`, flagged recovered)
+```
+`lb_accounting.py` verifies conservation on the REAL logs by unique ticket:
+every placed ticket terminates exactly once; every fill ticket is exactly one
+trade row or currently open; no phantom rows; duplicates are violations. It is
+run inside every report, and **the ALIVE verdict is gated on BOTH broker
+reconciliation AND conservation passing**. Backtest-scale conservation:
+GBPUSD funnel 478 breakouts = 313 filled + 163 expired + 2 invalidated (exact).
+
+## Answer to the key question
+
+*"Can any trade, order, signal, or event disappear from the experiment
+without being recorded somewhere?"*
+
+Attempts to make one disappear: fast fill+close between ticks (F1), crash
+mid-placement (F2), state deletion (drilled), state corruption (drilled),
+container restart mid-trade (drilled), duplicate recording (G2 — found &
+fixed), history amnesia after restart (disproven), silent report failure (G3 —
+found & fixed). **Every attempt now fails.** A disappearance would require the
+broker's own deal history to be wrong AND the dated snapshots AND the
+append-only local logs to all be wrong together. The framework is trustworthy
+within the documented demo-execution caveats.
+
+QA tracer trade (position 1814453758, −$0.03) remains permanently in
+trades.csv/broker history for accounting; metrics count only trades from
+TRADING_START = 2026-07-20.
