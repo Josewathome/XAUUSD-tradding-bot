@@ -36,3 +36,7 @@ research/box_theory/data/
 research/box_theory/results/
 # keep small evidence tables (force-added): zone_stats.csv, robustness.json
 # report/ (markdown + charts) IS committed — it is the deliverable
+
+# ── London Breakout forward test: live experiment data (code is committed) ──
+research/forward_test/data/
+research/forward_test/reports/

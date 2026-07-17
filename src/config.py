@@ -471,3 +471,7 @@ REEVAL_REVERSAL_CONF:       float = float(os.environ.get("REEVAL_REVERSAL_CONF",
 
 # Buffer pips below/above swing point when computing a new structural SL.
 TRAIL_SL_BUFFER_PIPS: float = float(os.environ.get("TRAIL_SL_BUFFER_PIPS", "1.5"))
+
+# ── Magic number identifying THIS bot's orders (foreign-magic positions are
+#    never managed — see ExecutionService._monitor_open_trades) ─────────────
+BOT_MAGIC = 202400

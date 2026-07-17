@@ -197,6 +197,7 @@ class MT5TradeRepository(ITradeRepository):
                 status=      TradeStatus.OPEN,
                 created_at=  open_dt,
                 mt5_ticket=  p["ticket"],
+                magic=       p.get("magic"),
             ))
         return trades
 

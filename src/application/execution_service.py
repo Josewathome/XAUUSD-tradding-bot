@@ -519,8 +519,14 @@ class ExecutionService:
         digits   = self._md.get_symbol_digits(symbol)
         pip_calc = PipCalculator(digits=digits)
 
+        bot_magic = int(getattr(config, "BOT_MAGIC", 202400))
         for pos in open_positions:
             if pos.symbol != symbol:
+                continue
+            # Never manage positions opened by another system (foreign magic):
+            # e.g. the London-Breakout forward-tester runs its own experiment on
+            # this account and its trades must not receive TP1/TP2/time exits.
+            if pos.magic is not None and int(pos.magic) != bot_magic:
                 continue
 
             ticket = int(pos.mt5_ticket or pos.id)

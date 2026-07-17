@@ -102,6 +102,7 @@ class Trade:
     mt5_ticket:  Optional[int] = None
     commission:   float = 0.0    # per-lot per-side commission paid (USD)
     spread_cost:  float = 0.0    # spread cost at entry (USD)
+    magic:        Optional[int] = None  # MT5 magic number of the opening order
 
 
 # ── Signal ────────────────────────────────────────────────────────────────────
