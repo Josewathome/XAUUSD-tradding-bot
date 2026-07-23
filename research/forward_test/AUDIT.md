@@ -151,3 +151,90 @@ within the documented demo-execution caveats.
 QA tracer trade (position 1814453758, −$0.03) remains permanently in
 trades.csv/broker history for accounting; metrics count only trades from
 TRADING_START = 2026-07-20.
+
+---
+
+# Addendum 2 — Week-1 Live Incident (2026-07-23, PM review discovery)
+
+Discovered during the first scheduled PM/adversarial review (not by automated
+alerting — see G5 below, now fixed).
+
+## G4 — CRITICAL — Day-rollover deadlock (found LIVE, in production)
+
+**The bug:** `step()`'s date-rollover check bailed out (`return st`) whenever
+`order_ticket`/`position_ticket` was truthy, BEFORE calling `reconcile()`, and
+neither field was ever cleared once a trade reached `DONE`. Consequence: once
+a pair completed **one single trade**, it could **never take another signal
+again** — the day never rolled forward.
+
+**Impact, quantified exactly:**
+- **EURUSD**: state stuck at `date=2026-07-17` (the QA tracer trade from the
+  prior audit pass) from before trading even started. **Took zero signals**
+  on 2026-07-20, 21, 22, 23 — its entire first week.
+- **GBPUSD**: took its first (real) signal Monday 2026-07-20 as designed,
+  closed at 14:50 (stop-loss, -1.022R) — then stuck. **Took zero signals**
+  on 07-21, 22, 23.
+- Additionally: today's (07-23) trading window (server 09:00-13:00) had
+  **already closed** (server time was 14:19) by the time the fix was
+  diagnosed and deployed, so the fix's first live effect is tomorrow,
+  2026-07-24.
+- **The already-recorded Monday GBPUSD trade is unaffected and valid** — it
+  was fully executed and reconciled before the bug's effect (which only
+  blocks *future* signal evaluation, not past recording).
+
+**Root cause of root cause:** the bug was latent since the runner was first
+written (the day-rollover logic was never exercised past a single completed
+trade in any earlier drill — all prior drills tested mid-trade recovery, not
+next-day continuation). It was *triggered* for EURUSD specifically by the
+QA tracer trade left over from the previous audit pass, one week before
+trading start — a process lesson: **test/QA activity must be followed by a
+clean-state verification immediately before the official start**, which
+was not done.
+
+**Fix:** the day-rollover now only defers to "yesterday's business" when the
+phase is genuinely non-terminal (not `DONE`) and a ticket is outstanding; in
+that case `reconcile()` is still called (with `now` already on the new day)
+so it can resolve/EOD it. A `DONE` phase always rolls to a fresh `IDLE` day
+regardless of stale ticket fields. **Verified live**: both pairs immediately
+reset to `{date: 2026-07-23, phase: IDLE}` on the next tick after the patch.
+
+**Could this have manufactured a false ALIVE?** No — in the opposite
+direction: this bug can only produce **fewer** trades than the true signal
+rate, which delays reaching n=60 and, if anything, biases toward RUNNING/
+under-observed rather than a false positive. It could, however, have
+produced a false REJECT-by-starvation (never reaching 60 trades) or a
+badly underpowered ALIVE (if by chance the few trades taken happened to
+qualify) — both now moot since it is fixed in week 1.
+
+## G5 — HIGH — Monitoring blind spot: connectivity failures were invisible
+
+Found while investigating 4 `FATAL` lines in `cron.log` (3× `IPC timeout`,
+1× `Terminal: Authorization failed`, all apparently transient/self-recovered
+via the 5-min retry cadence). Root cause: `main()` wrote the process
+heartbeat *before* attempting the MT5 connection, and connection failures
+were only `print()`-ed to stdout, never logged via `event()`. Consequence:
+**the heartbeat could stay "fresh" indefinitely while MT5 connectivity
+silently failed every single tick** — a runner that never once reaches its
+own trading logic would look identical, from the outside, to one working
+normally.
+
+**Fix:** connection failures now emit `mt5_connect_FAILED` events (stage-
+tagged: initialize / terminal_info / server_time / stale_quotes). A second,
+narrower heartbeat (`mt5_heartbeat`) updates only after a confirmed live
+connection + time check; the daily report now alerts if it goes stale
+(>60 min on a trading day) even while the process heartbeat looks fine, and
+separately alerts on ≥6 connectivity failures in 24h. A `stale_pair_days()`
+check was also added, directly targeting G4-shaped bugs: any pair whose
+state `date` lags today by ≥2 days with a terminal phase on a weekday now
+triggers an immediate alert — this specific incident would have been caught
+on 2026-07-21, its first full missed day, had this check existed.
+
+## Trust question, re-answered
+
+The previous audit's claim — "a false positive would require the broker's
+own history to be wrong" — **still holds for data integrity**: nothing was
+lost, duplicated, or misrecorded. But this incident shows integrity is not
+sufficient; **availability** (the experiment actually generating trades) had
+a real, un-alarmed failure mode. That gap is now closed (G5). The instrument
+is trustworthy for what it records; it required this addendum to also be
+trustworthy for what it *should have recorded but silently didn't*.

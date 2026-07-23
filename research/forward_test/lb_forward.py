@@ -330,8 +330,17 @@ def reconcile(pair, st, now):
 def step(pair, st, now):
     today = now.strftime("%Y-%m-%d")
     if st.get("date") != today:
-        if st.get("order_ticket") or st.get("position_ticket"):
-            return st            # yesterday's business still live; reconcile handles it
+        # G4 FIX: a pair whose last trade is DONE must roll to a fresh day
+        # even though its (closed) order_ticket/position_ticket are still
+        # populated in state -- those are historical, not "still live". Only
+        # a NON-done phase with an outstanding ticket is genuinely live
+        # business spanning midnight, and even then reconcile() must still
+        # run (with 'now' already on the new day) so it can resolve/EOD it.
+        still_live = st.get("phase") not in ("DONE", None) and (
+            st.get("order_ticket") or st.get("position_ticket"))
+        if still_live:
+            reconcile(pair, st, now)
+            return st
         st = {"date": today, "phase": "IDLE", "dow": now.weekday()}
 
     reconcile(pair, st, now)
@@ -575,16 +584,22 @@ def main():
     except Exception:
         pass
     if not mt5.initialize(timeout=20000):
-        print("FATAL mt5.initialize: %s" % str(mt5.last_error()))
+        err = str(mt5.last_error())
+        print("FATAL mt5.initialize: %s" % err)
+        event("SYS", "mt5_connect_FAILED", stage="initialize", err=err)
         sys.exit(1)
     if "--audit" in sys.argv:
         audit_dump(); mt5.shutdown(); return
     ti = mt5.terminal_info()
     if ti is None or not ti.connected:
-        print("terminal not connected — skipping tick"); mt5.shutdown(); return
+        print("terminal not connected — skipping tick")
+        event("SYS", "mt5_connect_FAILED", stage="terminal_info")
+        mt5.shutdown(); return
     now = server_now()
     if now is None:
-        print("no server time (market closed?)"); mt5.shutdown(); return
+        print("no server time (market closed?)")
+        event("SYS", "mt5_connect_FAILED", stage="server_time")
+        mt5.shutdown(); return
     # stale-quote guard: server (UK+2) vs host UTC differ by a stable offset;
     # if the freshest tick is >30min behind that expectation, do not act.
     host_utc = dt.datetime.utcnow()
@@ -592,7 +607,18 @@ def main():
     lag_min = (expect - now).total_seconds() / 60.0
     if lag_min > 90:                            # tolerant of the DST-mismatch hour
         print("stale quotes (lag %.0f min) — skipping tick" % lag_min)
+        event("SYS", "mt5_connect_FAILED", stage="stale_quotes", lag_min=round(lag_min, 1))
         mt5.shutdown(); return
+    # G5 FIX: this second heartbeat only updates on a CONFIRMED live MT5
+    # connection+time check. The first heartbeat (top of main) proves the
+    # wine/python process executes; this one proves the tick actually had a
+    # working broker connection this cycle. Monitoring alerts on staleness of
+    # THIS file, not the process heartbeat, to catch silent connectivity rot.
+    try:
+        with open(os.path.join(DATA, "mt5_heartbeat"), "w") as f:
+            f.write(now.isoformat())
+    except Exception:
+        pass
     state = load_state()
     try:
         orphan_sweep(state, now)

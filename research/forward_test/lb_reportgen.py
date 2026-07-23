@@ -165,6 +165,45 @@ def heartbeat_age_min():
     return (dt.datetime.now().timestamp() - os.path.getmtime(hb)) / 60.0
 
 
+def mt5_heartbeat_age_min():
+    """G5: staleness of the CONFIRMED-connection heartbeat. If this is old
+    while the process heartbeat is fresh, MT5 connectivity is silently
+    failing every tick (the process runs but never reaches the trading
+    logic) -- a distinct, more dangerous failure mode than a dead cron."""
+    hb = os.path.join(DATA, "mt5_heartbeat")
+    if not os.path.exists(hb):
+        return None
+    return (dt.datetime.now().timestamp() - os.path.getmtime(hb)) / 60.0
+
+
+def stale_pair_days(state_path):
+    """G4: a pair whose state 'date' lags today's date by >1 day on a
+    trading day, with phase DONE/IDLE (not legitimately mid-trade), means
+    the day-rollover logic is stuck -- exactly the bug found 2026-07-23."""
+    out = []
+    if not os.path.exists(state_path):
+        return out
+    try:
+        S = json.load(open(state_path))
+    except Exception:
+        return out
+    today = dt.date.today()
+    if today.weekday() >= 5:
+        return out
+    for pair, st in S.items():
+        if not isinstance(st, dict) or "date" not in st:
+            continue
+        try:
+            d = dt.date.fromisoformat(st["date"])
+        except Exception:
+            continue
+        gap = (today - d).days
+        if gap >= 2 and st.get("phase") in ("DONE", "IDLE", None):
+            out.append("%s stuck on %s (%d days stale, phase=%s)" %
+                      (pair, d, gap, st.get("phase")))
+    return out
+
+
 def send_alert(subject, body):
     """Email alert using the bot's SMTP credentials from the repo .env."""
     env = {}
@@ -243,10 +282,24 @@ def main():
     # ── liveness + integrity alerting (F18) ──
     alerts = []
     hb = heartbeat_age_min()
+    mhb = mt5_heartbeat_age_min()
     wd = dt.datetime.utcnow().weekday()
     if wd < 5 and (hb is None or hb > 45):
         alerts.append("tick heartbeat is %s min old — runner may be down" %
                       ("missing" if hb is None else "%.0f" % hb))
+    elif wd < 5 and (mhb is None or mhb > 60):
+        alerts.append("runner is ticking but MT5 connection heartbeat is %s min old "
+                      "— silent connectivity failure (IPC/auth/stale quotes)" %
+                      ("missing" if mhb is None else "%.0f" % mhb))
+    stale_pairs = stale_pair_days(os.path.join(DATA, "state.json"))
+    for sp in stale_pairs:
+        alerts.append("STALE DAY-ROLLOVER: " + sp)
+    conn_fails = 0
+    if len(E):
+        recent1d = E[E.t_utc >= pd.Timestamp(dt.datetime.utcnow() - dt.timedelta(days=1))]
+        conn_fails = int((recent1d.event == "mt5_connect_FAILED").sum())
+        if conn_fails >= 6:   # >=6 failed ticks/24h = something is actually wrong, not one blip
+            alerts.append("%d MT5 connectivity failures in the last 24h" % conn_fails)
     if not rec_ok and len(T) > 0:
         alerts.append("broker reconciliation FAILED: " + " | ".join(rec_lines))
     if not cons_ok:

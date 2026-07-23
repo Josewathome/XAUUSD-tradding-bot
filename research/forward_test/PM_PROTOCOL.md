@@ -5,8 +5,15 @@ survives real forward conditions. The experiment is guilty until proven
 innocent. No rule changes, no parameter tuning, no new filters, no goalpost
 moves, no cherry-picking, no early stopping on favorable evidence.
 
+## Process lesson (added 2026-07-23, post-incident)
+Any QA/tracer/drill activity against the live experiment MUST be followed by
+an explicit clean-state verification (state.json shows both pairs IDLE with
+today's date) before relying on the automated pipeline unattended. The Week-1
+day-rollover deadlock (G4) was latent in the code but only manifested for
+EURUSD because a leftover QA state was never re-verified before trading start.
+
 ## Automated (cron, no judgment required)
-- Every 5 min: tick engine + heartbeat.
+- Every 5 min: tick engine + heartbeat + mt5_heartbeat (confirmed-connection liveness, added post-G5).
 - Daily 16:20 EAT: broker dump → reconcile → conservation → metrics vs
   baselines → Decision Dashboard → alerts email on any anomaly or REJECT.
 - Weekly Sat 14:00 EAT: deliverable A — trades taken/missed, WR, PF,
