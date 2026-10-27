@@ -1,22 +1,21 @@
-# XAUUSD Trading Bot — Execution Framework
+# XAUUSD Trading Bot — MT5 Framework, Strategy Engines and Research
 
-A complete, production-shaped **MT5 trading infrastructure** for XAUUSD (gold),
-replicated from the `scraper-forex-bot` operational framework. It contains the
-entire connectivity, execution, monitoring, risk-management and operations
-stack — **but no trading strategy**. The "brain" (signal generation, indicators,
-entry/exit math, structural analysis) is deliberately left out and replaced with
-clean, well-documented interfaces and no-op placeholders.
+An MT5 trading system for Linux (MetaTrader 5 under Wine in Docker, driven
+from Python) with three parts:
 
-Out of the box the bot connects to MT5, streams ticks/candles, manages
-sessions, runs all its risk gates, journals, checkpoints, serves a dashboard,
-and recovers from disconnects — it simply **never opens a trade**, because the
-strategy engine is a placeholder. Plug in a real strategy and it trades.
+1. **Execution framework** — broker connectivity, order lifecycle, risk gates,
+   journaling, crash recovery and a dashboard, replicated from the
+   `Scraper-forex-bot` framework and unit-tested.
+2. **Strategy engines** behind a stable interface — an XAUUSD five-gate scalping
+   engine and a EURUSD London Breakout engine (`src/strategy/`).
+3. **Research** (`research/`) — backtests with costs, parameter sweeps and
+   adversarial out-of-sample tests, plus a pre-registered demo forward test.
 
-> **Why this split?** The expensive, fiddly, easy-to-get-wrong part of an
-> automated trading system is the *infrastructure* (broker connectivity, order
-> lifecycle, margin/risk safety, crash recovery). That is fully built and
-> battle-tested here. The *strategy* is the part you iterate on — so it lives
-> behind a stable interface you can swap freely without touching plumbing.
+> **Status:** demo accounts only. No strategy here has shown a statistically
+> robust live edge. Live order placement is off by default
+> (`STRATEGY_GATE_ENABLED=false`).
+
+![London Breakout: expectancy by pair, M15, 24 months, in-sample with costs](research/box_theory/report/fig_lb_pairs.png)
 
 ---
 
@@ -87,13 +86,17 @@ only on abstract contracts at the strategy boundary.
 | **Operations** | `Scheduler` (cleanup/analytics), `EmailService` alerts, `CheckpointService`, `CleanupService`, log/cache retention |
 | **Deployment** | Docker (`gmag11/metatrader5_vnc`), Wine, `override_start.sh`, EA injection tools |
 
-### What is a placeholder (the strategy — implement later)
+### Strategy engines (wired in `src/main_stream.py`)
 
-| Removed brain | Replaced by |
-|---------------|-------------|
-| Signal generation, indicators, multi-TF alignment, tick microstructure, candle scoring, market-structure (BOS/CHoCH), trade-quality scoring | `IStrategyEngine` + `PlaceholderStrategyEngine` (returns no signals) |
-| SL/TP price math (swing-based, ATR-adaptive, structure-aware targets) | Supplied by the strategy on each `StrategySignal` (`stop_loss`, `take_profit_1/2`) |
-| Open-trade re-evaluation: continuation scoring, structural SL placement, reversal detection, recovery conviction | `ITradeGuardian` + `PlaceholderTradeGuardian` (returns no actions) |
+| Engine | Symbol | Logic |
+|--------|--------|-------|
+| `XAUUSDStrategyEngine` + `XAUUSDTradeGuardian` (`xauusd_engine.py`) | XAUUSD | Five gates: session window, ATR regime, EMA(20/50) trend, VWAP deviation, liquidity sweep with close-back |
+| `EURUSDStrategyEngine` + `EURUSDTradeGuardian` (`eurusd_engine.py`) | EURUSD | London Breakout |
+| `MultiSymbolEngine` / `MultiSymbolGuardian` (`multi_engine.py`) | both | Routes each symbol to its engine |
+| `PlaceholderStrategyEngine` / `PlaceholderTradeGuardian` | — | No-op reference implementations of the interfaces |
+
+The XAUUSD engine has not been validated by the research below; treat it as
+untested.
 
 ---
 
@@ -120,19 +123,40 @@ Everything the strategy must provide lives in **`src/strategy/interfaces.py`**:
 
    ```python
    def build_engine(symbols) -> IStrategyEngine:
-       from src.strategy.xauusd_engine import XauusdEngine
-       return XauusdEngine(symbols=symbols)
+       from src.strategy.my_engine import MyStrategyEngine
+       return MyStrategyEngine(symbols=symbols)
 
    def build_guardian() -> ITradeGuardian:
-       from src.strategy.xauusd_guardian import XauusdGuardian
-       return XauusdGuardian()
+       from src.strategy.my_engine import MyTradeGuardian
+       return MyTradeGuardian()
    ```
+
+   The current wiring (`XAUUSDStrategyEngine` and `EURUSDStrategyEngine` via
+   `MultiSymbolEngine`) is a working example.
 
 3. Set `STRATEGY_GATE_ENABLED=true` in `.env` when you are ready to place live
    trades. Nothing else in the framework changes.
 
 See **`docs/STRATEGY_INTEGRATION.md`** for a step-by-step guide and a minimal
 reference implementation.
+
+---
+
+## Research
+
+Standalone modules under `research/`; they do not touch the live framework.
+Results are committed as JSON (`research/box_theory/results/`) and Markdown
+reports (`research/box_theory/report/`); raw price data is gitignored.
+
+| Study | Result | Report |
+|-------|--------|--------|
+| Box Theory (fade previous-day high/low on a rejection candle) | Rejected: 87% of 16,096 configurations with ≥30 trades lose money | `BOX_THEORY_REPORT.md` |
+| London Breakout, M15, 24 months, 6 pairs, with costs (in-sample) | Pooled +0.075 R/trade, n = 1,230, PF 1.19, p = 0.005. GBPUSD +0.134 R, EURUSD +0.114 R, XAUUSD −0.060 R | `LONDON_BREAKOUT_REPORT.md` |
+| London Breakout adversarial tests | Survives most single stresses; fails under combined cost +50%, slippage +1 pip and the most recent 12 months (+0.012 R, p = 0.39) | `LB_ADVERSARIAL_REPORT.md` |
+| Demo forward test (`research/forward_test/`) | Running; pre-registered GO/REJECT criteria in its README | — |
+
+The edge found is on FX pairs, not gold, and it weakens under realistic
+stress. That is why the next step is a demo forward test, not live trading.
 
 ---
 
@@ -158,8 +182,12 @@ python -m src.main_stream
 ### Tests (no broker needed)
 
 ```bash
-python -m tests.test_framework
+python -m tests.test_framework                      # framework: 11 tests
+cd research && python -m box_theory.tests.test_core  # research engine: 33 tests
+cd research && python -m box_theory.tests.test_sneaky
 ```
+
+The research tests need numpy and pandas.
 
 ---
 
@@ -179,8 +207,14 @@ src/
   api/server.py                 # Flask dashboard
   strategy/
     interfaces.py               # ◄── THE strategy/framework contracts
+    xauusd_engine.py            # XAUUSD five-gate engine + guardian
+    eurusd_engine.py            # EURUSD London Breakout engine + guardian
+    multi_engine.py             # per-symbol routing
     placeholder_engine.py       # no-op IStrategyEngine
     placeholder_guardian.py     # no-op ITradeGuardian
+research/
+  box_theory/                   # backtest engine, sweeps, robustness, reports, tests
+  forward_test/                 # London Breakout demo forward test
 tests/test_framework.py
 docker-compose.yml · override_start.sh · env.example
 docs/STRATEGY_INTEGRATION.md
@@ -190,8 +224,8 @@ docs/STRATEGY_INTEGRATION.md
 
 ## Safety defaults
 
-- **Observation mode** by default (`STRATEGY_GATE_ENABLED=false`) — and the
-  placeholder engine emits no signals regardless.
+- **Observation mode** by default (`STRATEGY_GATE_ENABLED=false`): the bot
+  logs every signal but places no orders until you enable it.
 - **Fail-closed** everywhere: missing margin/pip-value/cost data rejects the
   trade rather than guessing.
 - Use a **demo account** until your strategy is validated.
